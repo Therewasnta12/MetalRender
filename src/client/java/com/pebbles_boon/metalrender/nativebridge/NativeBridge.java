@@ -195,6 +195,18 @@ public final class NativeBridge {
 
     public static native float nGetGpuFrameTimeMs();
 
+    public static native double nGetWaitRenderMs();
+
+    public static native double nGetCglBindMs();
+
+    public static native double nGetNativeDrawPrepMs();
+
+    public static native int nGetPassGpuMs(float[] out);
+
+    public static native int nGetMegaStats(long[] out);
+
+    public static native int nGetQuadStats(long[] out);
+
     public static native boolean nAreResidencySetsSupported();
 
     public static native long nCreateResidencySet(long device);

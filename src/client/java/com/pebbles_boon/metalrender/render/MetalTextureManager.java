@@ -45,6 +45,17 @@ public class MetalTextureManager {
     private static final long LIGHTMAP_MIN_GAME_TIME_DELTA = 4L;
     private int atlasFramesSinceUpload = 0;
     private int lightmapFramesSinceUpload = 0;
+    private volatile double lastAtlasMs;
+    private volatile double lastLightmapMs;
+
+    public double getLastAtlasMs() {
+        return lastAtlasMs;
+    }
+
+    public double getLastLightmapMs() {
+        return lastLightmapMs;
+    }
+
     private long lastLightmapObservedGameTime = Long.MIN_VALUE;
     private long lastUploadedLightmapGameTime = Long.MIN_VALUE;
 
@@ -128,86 +139,98 @@ public class MetalTextureManager {
     public void updateBlockAtlas() {
         if (blockAtlasTexture == 0 || usingFallbackBlockAtlas)
             return;
-        atlasFramesSinceUpload++;
-
-        boolean dirty = atlasDirty;
-        if (dirty) {
-            if (atlasFramesSinceUpload < ATLAS_MIN_UPLOAD_INTERVAL)
-                return;
-            atlasDirty = false;
-            atlasFramesSinceUpload = 0;
-            lastAtlasUploadMs = System.currentTimeMillis();
-        } else {
-            if (atlasFramesSinceUpload < ATLAS_HEARTBEAT_FRAMES)
-                return;
-            long nowMs = System.currentTimeMillis();
-            long minIntervalMs = atlasBackoffActive
-                    ? ATLAS_BACKOFF_INTERVAL_MS
-                    : ATLAS_MIN_UPLOAD_INTERVAL_MS;
-            if (nowMs - lastAtlasUploadMs < minIntervalMs + atlasExtraDelayMs) {
-                return;
-            }
-            lastAtlasUploadMs = nowMs;
-            atlasFramesSinceUpload = 0;
-        }
-        int mipLevels = currentMipmapLevels();
-        if (mipLevels != blockAtlasMipLevels) {
-            loadBlockAtlas();
-            return;
-        }
-
+        long t0 = System.nanoTime();
         try {
-            Minecraft mc = Minecraft.getInstance();
-            if (mc == null || mc.getTextureManager() == null) {
-                if (dirty)
-                    atlasDirty = true;
-                return;
+            atlasFramesSinceUpload++;
+            boolean dirty = atlasDirty;
+            if (dirty) {
+                if (atlasFramesSinceUpload < ATLAS_MIN_UPLOAD_INTERVAL)
+                    return;
+                atlasDirty = false;
+                atlasFramesSinceUpload = 0;
+                lastAtlasUploadMs = System.currentTimeMillis();
+            } else {
+                if (atlasFramesSinceUpload < ATLAS_HEARTBEAT_FRAMES)
+                    return;
+                long nowMs = System.currentTimeMillis();
+                long minIntervalMs = atlasBackoffActive
+                        ? ATLAS_BACKOFF_INTERVAL_MS
+                        : ATLAS_MIN_UPLOAD_INTERVAL_MS;
+                if (nowMs - lastAtlasUploadMs < minIntervalMs + atlasExtraDelayMs) {
+                    return;
+                }
+                lastAtlasUploadMs = nowMs;
+                atlasFramesSinceUpload = 0;
             }
-            AbstractTexture atlasTexture = mc.getTextureManager().getTexture(BLOCKS_ATLAS_ID);
-            if (atlasTexture == null) {
-                if (dirty)
-                    atlasDirty = true;
-                return;
-            }
-            int glTexId = 0;
-            var gpuTex = atlasTexture.getTexture();
-            if (gpuTex instanceof GlTexture glTex) {
-                glTexId = glTex.glId();
-            }
-            if (glTexId == 0) {
-                if (dirty)
-                    atlasDirty = true;
-                return;
-            }
-            int prevTex = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
-            GL11.glBindTexture(GL11.GL_TEXTURE_2D, glTexId);
-            int width = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0,
-                    GL11.GL_TEXTURE_WIDTH);
-            int height = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0,
-                    GL11.GL_TEXTURE_HEIGHT);
-            if (width != blockAtlasWidth || height != blockAtlasHeight) {
-                GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevTex);
+            int mipLevels = currentMipmapLevels();
+            if (mipLevels != blockAtlasMipLevels) {
                 loadBlockAtlas();
                 return;
             }
-            int dataSize = width * height * 4;
-            if (atlasPixelBuffer == null || atlasPixelBuffer.capacity() < dataSize) {
-                atlasPixelBuffer = BufferUtils.createByteBuffer(dataSize);
+
+            try {
+                Minecraft mc = Minecraft.getInstance();
+                if (mc == null || mc.getTextureManager() == null) {
+                    if (dirty)
+                        atlasDirty = true;
+                    return;
+                }
+                AbstractTexture atlasTexture = mc.getTextureManager().getTexture(BLOCKS_ATLAS_ID);
+                if (atlasTexture == null) {
+                    if (dirty)
+                        atlasDirty = true;
+                    return;
+                }
+                int glTexId = 0;
+                var gpuTex = atlasTexture.getTexture();
+                if (gpuTex instanceof GlTexture glTex) {
+                    glTexId = glTex.glId();
+                }
+                if (glTexId == 0) {
+                    if (dirty)
+                        atlasDirty = true;
+                    return;
+                }
+                int prevTex = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, glTexId);
+                int width = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0,
+                        GL11.GL_TEXTURE_WIDTH);
+                int height = GL11.glGetTexLevelParameteri(GL11.GL_TEXTURE_2D, 0,
+                        GL11.GL_TEXTURE_HEIGHT);
+                if (width != blockAtlasWidth || height != blockAtlasHeight) {
+                    GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevTex);
+                    loadBlockAtlas();
+                    return;
+                }
+                int dataSize = width * height * 4;
+                if (atlasPixelBuffer == null || atlasPixelBuffer.capacity() < dataSize) {
+                    atlasPixelBuffer = BufferUtils.createByteBuffer(dataSize);
+                }
+                atlasPixelBuffer.clear();
+                long syncStartNs = System.nanoTime();
+                GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA,
+                        GL11.GL_UNSIGNED_BYTE, atlasPixelBuffer);
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevTex);
+                if (atlasReadbackScratch == null || atlasReadbackScratch.length < dataSize) {
+                    atlasReadbackScratch = new byte[dataSize];
+                }
+                atlasPixelBuffer.get(atlasReadbackScratch, 0, dataSize);
+                uploadAtlasDiff(width, height, dataSize);
+                trackAtlasSyncCost(syncStartNs);
+            } catch (Exception e) {
+                if (dirty)
+                    atlasDirty = true;
             }
-            atlasPixelBuffer.clear();
-            long syncStartNs = System.nanoTime();
-            GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA,
-                    GL11.GL_UNSIGNED_BYTE, atlasPixelBuffer);
-            GL11.glBindTexture(GL11.GL_TEXTURE_2D, prevTex);
-            if (atlasReadbackScratch == null || atlasReadbackScratch.length < dataSize) {
-                atlasReadbackScratch = new byte[dataSize];
-            }
-            atlasPixelBuffer.get(atlasReadbackScratch, 0, dataSize);
-            uploadAtlasDiff(width, height, dataSize);
-            trackAtlasSyncCost(syncStartNs);
         } catch (Exception e) {
-            if (dirty)
-                atlasDirty = true;
+            if (atlasDirty) {
+            }
+        } finally {
+            long atlasNs = System.nanoTime() - t0;
+            lastAtlasMs = atlasNs / 1_000_000.0;
+            if (atlasNs > 50_000) {
+                com.pebbles_boon.metalrender.performance.MetalRenderProfiler.getInstance()
+                        .recordAtlasTime(atlasNs);
+            }
         }
     }
 
@@ -308,23 +331,33 @@ public class MetalTextureManager {
     public void updateLightmap() {
         if (lightmapTexture == 0)
             return;
-        Minecraft mc = Minecraft.getInstance();
-        long gameTime = mc != null && mc.level != null ? mc.level.getGameTime()
-                : Long.MIN_VALUE;
-        if (gameTime == lastLightmapObservedGameTime)
-            return;
-        lastLightmapObservedGameTime = gameTime;
-        if (lastUploadedLightmapGameTime != Long.MIN_VALUE &&
-                gameTime != Long.MIN_VALUE &&
-                gameTime - lastUploadedLightmapGameTime < LIGHTMAP_MIN_GAME_TIME_DELTA) {
-            return;
+        long t0 = System.nanoTime();
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            long gameTime = mc != null && mc.level != null ? mc.level.getGameTime()
+                    : Long.MIN_VALUE;
+            if (gameTime == lastLightmapObservedGameTime)
+                return;
+            lastLightmapObservedGameTime = gameTime;
+            if (lastUploadedLightmapGameTime != Long.MIN_VALUE &&
+                    gameTime != Long.MIN_VALUE &&
+                    gameTime - lastUploadedLightmapGameTime < LIGHTMAP_MIN_GAME_TIME_DELTA) {
+                return;
+            }
+            lightmapFramesSinceUpload++;
+            if (lightmapFramesSinceUpload < LIGHTMAP_MIN_UPLOAD_INTERVAL)
+                return;
+            lightmapFramesSinceUpload = 0;
+            uploadLightmap();
+            lastUploadedLightmapGameTime = gameTime;
+        } finally {
+            long lightNs = System.nanoTime() - t0;
+            lastLightmapMs = lightNs / 1_000_000.0;
+            if (lightNs > 50_000) {
+                com.pebbles_boon.metalrender.performance.MetalRenderProfiler.getInstance()
+                        .recordLightmapTime(lightNs);
+            }
         }
-        lightmapFramesSinceUpload++;
-        if (lightmapFramesSinceUpload < LIGHTMAP_MIN_UPLOAD_INTERVAL)
-            return;
-        lightmapFramesSinceUpload = 0;
-        uploadLightmap();
-        lastUploadedLightmapGameTime = gameTime;
     }
 
     public void loadLightmap() {

@@ -650,8 +650,8 @@ public class MetalEntityRenderer {
             random.setSeed(blockState.getSeed(seedPos));
         } catch (Exception ignored) {
         }
-        java.util.ArrayList<net.minecraft.client.renderer.block.dispatch.BlockStateModelPart> parts =
-                new java.util.ArrayList<>(4);
+        java.util.ArrayList<net.minecraft.client.renderer.block.dispatch.BlockStateModelPart> parts = new java.util.ArrayList<>(
+                4);
         try {
             model.collectParts(random, parts);
         } catch (Exception ignored) {
@@ -798,8 +798,8 @@ public class MetalEntityRenderer {
             if (mc == null || mc.getBlockColors() == null) {
                 return 0xFFFFFFFF;
             }
-            net.minecraft.client.color.block.BlockTintSource source =
-                    mc.getBlockColors().getTintSource(blockState, tintIndex);
+            net.minecraft.client.color.block.BlockTintSource source = mc.getBlockColors().getTintSource(blockState,
+                    tintIndex);
             if (source == null) {
                 return 0xFFFFFFFF;
             }
@@ -1281,8 +1281,7 @@ public class MetalEntityRenderer {
                     || glTexture.glId() != glTextureId) {
                 return 0;
             }
-            com.pebbles_boon.metalrender.render.MetalWorldRenderer worldRenderer =
-                    MetalRenderClient.getWorldRenderer();
+            com.pebbles_boon.metalrender.render.MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
             if (worldRenderer == null || worldRenderer.getTextureManager() == null) {
                 return 0;
             }

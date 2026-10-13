@@ -7,7 +7,6 @@ SHADER_DIR="src/main/resources/native/shaders"
 xcrun -sdk macosx metal -c $SHADER_DIR/metalrender.metal -o $SHADER_DIR/metalrender.air
 xcrun -sdk macosx metal -c $SHADER_DIR/entity.metal -o $SHADER_DIR/entity.air
 xcrun -sdk macosx metal -c $SHADER_DIR/culling.metal -o $SHADER_DIR/culling.air
-xcrun -sdk macosx metal -c $SHADER_DIR/hiz.metal -o $SHADER_DIR/hiz.air
 xcrun -sdk macosx metal -c $SHADER_DIR/occlusion_culling.metal -o $SHADER_DIR/occlusion_culling.air
 xcrun -sdk macosx metal -c $SHADER_DIR/visibility_buffer.metal -o $SHADER_DIR/visibility_buffer.air
 xcrun -sdk macosx metal -c $SHADER_DIR/oit_transparency.metal -o $SHADER_DIR/oit_transparency.air
@@ -22,7 +21,6 @@ xcrun -sdk macosx metallib \
     $SHADER_DIR/metalrender.air \
     $SHADER_DIR/entity.air \
     $SHADER_DIR/culling.air \
-    $SHADER_DIR/hiz.air \
     $SHADER_DIR/occlusion_culling.air \
     $SHADER_DIR/visibility_buffer.air \
     $SHADER_DIR/oit_transparency.air \
@@ -34,7 +32,7 @@ xcrun -sdk macosx metallib \
 echo "Shaders compiled to src/main/resources/shaders.metallib"
 
 echo "Compiling native library..."
-JAVA_HOME=$(/usr/libexec/java_home)
+JAVA_HOME=${JAVA_HOME:-$(/usr/libexec/java_home)}
 echo "Using JAVA_HOME: $JAVA_HOME"
 
 clang++ -O3 -std=c++17 -dynamiclib \

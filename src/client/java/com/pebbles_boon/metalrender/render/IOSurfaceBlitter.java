@@ -73,6 +73,33 @@ public final class IOSurfaceBlitter {
     private long blitInterAccNs = 0;
     private long blitQuadAccNs = 0;
     private int blitStageCount = 0;
+    private volatile double lastBlitWaitMs;
+    private volatile double lastBlitBindMs;
+    private volatile double lastBlitCopyMs;
+    private volatile double lastBlitQuadMs;
+    private volatile double lastBlitGlGpuMs;
+
+    public double getLastBlitWaitMs() {
+        return lastBlitWaitMs;
+    }
+
+    public double getLastCglBindMs() {
+        return lastBlitBindMs;
+    }
+
+    public double getLastBlitCopyMs() {
+        return lastBlitCopyMs;
+    }
+
+    public double getLastBlitQuadMs() {
+        return lastBlitQuadMs;
+    }
+
+    public double getLastBlitGlGpuMs() {
+        double v = lastBlitGlGpuMs;
+        return v > 0.0 ? v : lastBlitQuadMs;
+    }
+
     private static final String VERTEX_SHADER = """
             #version 150 core
             in vec2 aPos;
@@ -240,19 +267,28 @@ public final class IOSurfaceBlitter {
                     consecutiveFastPathFailures = 0;
                     boolean ok = drawFullscreenQuad(width, height);
                     long t4 = System.nanoTime();
+                    double wMs = (t1 - t0) / 1_000_000.0;
+                    double bMs = (t2 - t1) / 1_000_000.0;
+                    double cMs = (t3 - t2) / 1_000_000.0;
+                    double qMs = (t4 - t3) / 1_000_000.0;
+                    lastBlitWaitMs = wMs;
+                    lastBlitBindMs = bMs;
+                    lastBlitCopyMs = cMs;
+                    lastBlitQuadMs = qMs;
+                    lastBlitGlGpuMs = cMs + qMs;
                     blitWaitAccNs += (t1 - t0);
                     blitBindAccNs += (t2 - t1);
                     blitInterAccNs += (t3 - t2);
                     blitQuadAccNs += (t4 - t3);
                     blitStageCount++;
                     if (blitStageCount >= 120) {
-                        double wMs = blitWaitAccNs / (blitStageCount * 1_000_000.0);
-                        double bMs = blitBindAccNs / (blitStageCount * 1_000_000.0);
-                        double iMs = blitInterAccNs / (blitStageCount * 1_000_000.0);
-                        double qMs = blitQuadAccNs / (blitStageCount * 1_000_000.0);
+                        double avgW = blitWaitAccNs / (blitStageCount * 1_000_000.0);
+                        double avgB = blitBindAccNs / (blitStageCount * 1_000_000.0);
+                        double avgI = blitInterAccNs / (blitStageCount * 1_000_000.0);
+                        double avgQ = blitQuadAccNs / (blitStageCount * 1_000_000.0);
                         MetalLogger.info(
                                 "[iosurface] timing w=%.2f b=%.2f i=%.2f q=%.2f (avg/%d)",
-                                wMs, bMs, iMs, qMs, blitStageCount);
+                                avgW, avgB, avgI, avgQ, blitStageCount);
                         blitWaitAccNs = 0;
                         blitBindAccNs = 0;
                         blitInterAccNs = 0;

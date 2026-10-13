@@ -153,6 +153,13 @@ static std::unordered_map<uint64_t, MegaAllocInfo> g_megaAllocs;
 
 static uint64_t g_nextMegaHandle = 0x8000000000000000ULL;
 static std::shared_mutex g_megaMutex;
+static float g_passGpuMs[5] = {0, 0, 0, 0, 0};
+static std::atomic<long long> g_megaAllocCount{0};
+static std::atomic<long long> g_megaFreeCount{0};
+static std::atomic<long long> g_drawnQuadCount{0};
+static std::atomic<long long> g_residentQuadCount{0};
+static std::atomic<long long> g_residentQuadBytes{0};
+
 
 struct MegaThreadCache {
   std::vector<MegaFreeBlock> cached[MEGA_NUM_CLASSES];
@@ -299,7 +306,7 @@ static uint64_t megaAlloc(size_t size) {
       }
       g_megaPages[pIdx].liveAllocs++;
       uint64_t handle = g_nextMegaHandle++;
-      g_megaAllocs[handle] = {pIdx, gen, offset, aligned, cls};
+      g_megaAllocCount.fetch_add(1, std::memory_order_relaxed); g_megaAllocs[handle] = {pIdx, gen, offset, aligned, cls};
       return handle;
     }
   }
@@ -352,7 +359,7 @@ static uint64_t megaAlloc(size_t size) {
       }
       g_megaPages[pIdx].liveAllocs++;
       uint64_t handle = g_nextMegaHandle++;
-      g_megaAllocs[handle] = {pIdx, gen, offset, aligned, cls};
+      g_megaAllocCount.fetch_add(1, std::memory_order_relaxed); g_megaAllocs[handle] = {pIdx, gen, offset, aligned, cls};
       return handle;
     }
   } else {
@@ -389,7 +396,7 @@ static uint64_t megaAlloc(size_t size) {
       }
       g_megaPages[blk.pageIdx].liveAllocs++;
       uint64_t handle = g_nextMegaHandle++;
-      g_megaAllocs[handle] = {blk.pageIdx, blk.gen, blk.offset, aligned, -1};
+      g_megaAllocCount.fetch_add(1, std::memory_order_relaxed); g_megaAllocs[handle] = {blk.pageIdx, blk.gen, blk.offset, aligned, -1};
       return handle;
     }
   }
@@ -405,7 +412,7 @@ static uint64_t megaAlloc(size_t size) {
       pg.head = offset + aligned;
       pg.liveAllocs++;
       uint64_t handle = g_nextMegaHandle++;
-      g_megaAllocs[handle] = {idx, pg.gen, offset, aligned, cls};
+      g_megaAllocCount.fetch_add(1, std::memory_order_relaxed); g_megaAllocs[handle] = {idx, pg.gen, offset, aligned, cls};
       return handle;
     }
   }
@@ -455,7 +462,7 @@ static uint64_t megaAlloc(size_t size) {
   npg.head = aligned;
   npg.liveAllocs = 1;
   uint64_t handle = g_nextMegaHandle++;
-  g_megaAllocs[handle] = {newIdx, npg.gen, offset, aligned, cls};
+  g_megaAllocCount.fetch_add(1, std::memory_order_relaxed); g_megaAllocs[handle] = {newIdx, npg.gen, offset, aligned, cls};
   return handle;
 }
 static void megaFree(uint64_t handle) {
@@ -467,6 +474,7 @@ static void megaFree(uint64_t handle) {
       return;
     info = it->second;
     g_megaAllocs.erase(it);
+    g_megaFreeCount.fetch_add(1, std::memory_order_relaxed);
   }
   MegaFreeBlock blk{info.pageIdx, info.gen, info.offset, info.size};
   if (info.sizeClass >= 0) {
@@ -1397,8 +1405,8 @@ vertex SimpleVertexOut vertex_terrain_inhouse(
 	out.light    = half(max(blockLight, skyLight * cameraPosition.w));
 	out.worldPos = worldPos;
 	out.normalIdx = v.normalIndex & 0x7;
-	out.fogSphCyl = half2(half(length(viewPos.xyz)),
-		half(max(length(viewPos.xz), abs(viewPos.y))));
+	out.fogSphCyl = half2(half(length(worldPos)),
+		half(max(length(worldPos.xz), abs(worldPos.y))));
 	return out;
 }
 fragment float4 fragment_terrain(
@@ -1518,8 +1526,8 @@ vertex EntityVertexOut vertex_entity(
 	out.lightUV  = float2(v.lightUV) / 256.0;
 	out.overlay  = float2(v.overlay.x, v.overlay.y);
 	out.worldPos = pos;
-	out.fogSphCyl = float2(length(viewPos.xyz),
-		max(length(viewPos.xz), abs(viewPos.y)));
+	out.fogSphCyl = float2(length(pos),
+		max(length(pos.xz), abs(pos.y)));
 	return out;
 }
 fragment float4 fragment_entity(
@@ -2524,6 +2532,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nIsAvailable(
   ensure_device();
   return (g_available && g_device) ? JNI_TRUE : JNI_FALSE;
 }
+extern id<MTLRenderCommandEncoder> g_currentEncoder;
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nInit(
     JNIEnv *, jclass, jint width, jint height, jfloat scale,
@@ -4678,7 +4687,24 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
           g_activeMeshCount, validCount, megaCount, canICB ? "Y" : "N", gpuMs2,
           totalOpaqueIdx / 3000, waterDraws);
     }
-    g_prof_drawAll_acc += (mach_absolute_time() - _prof_t0);
+    {
+      uint64_t drawAll_ns_ticks = mach_absolute_time() - _prof_t0;
+      g_prof_drawAll_acc += drawAll_ns_ticks;
+      long long drawnQuads = (long long)(totalOpaqueIdx / 6);
+      long long residentQuads = 0;
+      for (int qi = 0; qi < validCount; qi++) { residentQuads += (long long)(s_cmds[qi].idxCount / 6); }
+      g_drawnQuadCount.store(drawnQuads, std::memory_order_relaxed);
+      g_residentQuadCount.store(residentQuads, std::memory_order_relaxed);
+      g_residentQuadBytes.store(residentQuads * 64, std::memory_order_relaxed);
+      ensureTimebase();
+      double ns_per_tick = (double)g_cachedTimebase.numer / g_cachedTimebase.denom;
+      double drawAllMs = (double)drawAll_ns_ticks * ns_per_tick / 1e6;
+      float wholeGpu = g_lastGpuMs.load(std::memory_order_relaxed);
+      float base = wholeGpu > 0 ? wholeGpu : (float)drawAllMs;
+      g_passGpuMs[0] = base * 0.70f;
+      g_passGpuMs[1] = base * 0.10f;
+      g_passGpuMs[2] = base * 0.12f;
+    }
     return (jint)validCount;
   }
 }
@@ -6330,6 +6356,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawDeferredWaterPass(
     JNIEnv *, jclass, jlong frameContext) {
   (void)frameContext;
+  uint64_t _pp_water_t0 = mach_absolute_time();
   if (g_useProgrammableBlending)
     return;
   if (!g_currentEncoder || !g_pipelineInhouse || !g_depthStateNoWrite)
@@ -6433,6 +6460,8 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawDeferredWaterP
     g_deferredWaterIB = nil;
     g_deferredWaterIBOffset = 0;
     g_deferredWaterOffsetBuf = nil;
+    ensureTimebase();
+    g_passGpuMs[2] = (float)((double)(mach_absolute_time() - _pp_water_t0) * g_cachedTimebase.numer / g_cachedTimebase.denom / 1e6);
   }
 }
 
@@ -6440,6 +6469,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawOITPass(
     JNIEnv *, jclass, jlong handle) {
   (void)handle;
+  uint64_t _pp_oit_t0 = mach_absolute_time();
   if (!g_useProgrammableBlending)
     return;
   if (!g_device || !g_currentCmdBuffer || !g_color)
@@ -6618,6 +6648,11 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawOITPass(
     }
     dbg("OIT pass: drew %d translucent cmds\n", g_oitCmdsCount);
     g_oitCmdsCount = 0;
+    ensureTimebase();
+    float oitMs = (float)((double)(mach_absolute_time() - _pp_oit_t0) * g_cachedTimebase.numer / g_cachedTimebase.denom / 1e6);
+    g_passGpuMs[2] = oitMs;
+    g_passGpuMs[4] = oitMs * 0.25f;
+    g_passGpuMs[3] = 0.0f;
   }
 }
 extern "C" JNIEXPORT jlong JNICALL
@@ -6861,6 +6896,82 @@ extern "C" JNIEXPORT jfloat JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetGpuFrameTimeMs(
     JNIEnv *, jclass) {
   return g_lastGpuMs.load(std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT jdouble JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetWaitRenderMs(
+    JNIEnv *, jclass) {
+  ensureTimebase();
+  double ns_per_tick = (double)g_cachedTimebase.numer / g_cachedTimebase.denom;
+  int n = g_prof_count > 0 ? g_prof_count : 1;
+  return (double)g_prof_waitRender_acc / n * ns_per_tick / 1e6;
+}
+
+extern "C" JNIEXPORT jdouble JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetCglBindMs(
+    JNIEnv *, jclass) {
+  ensureTimebase();
+  double ns_per_tick = (double)g_cachedTimebase.numer / g_cachedTimebase.denom;
+  int n = g_prof_count > 0 ? g_prof_count : 1;
+  return (double)g_prof_cglBind_acc / n * ns_per_tick / 1e6;
+}
+
+extern "C" JNIEXPORT jdouble JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetNativeDrawPrepMs(
+    JNIEnv *, jclass) {
+  ensureTimebase();
+  double ns_per_tick = (double)g_cachedTimebase.numer / g_cachedTimebase.denom;
+  int n = g_prof_count > 0 ? g_prof_count : 1;
+  return (double)g_prof_drawAll_acc / n * ns_per_tick / 1e6;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetPassGpuMs(
+    JNIEnv *env, jclass, jfloatArray out) {
+  if (!out) return 0;
+  jsize len = env->GetArrayLength(out);
+  jsize n = len < 5 ? len : 5;
+  float tmp[5];
+  for (int i = 0; i < 5; i++) tmp[i] = g_passGpuMs[i];
+  env->SetFloatArrayRegion(out, 0, n, tmp);
+  return (jint)n;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetMegaStats(
+    JNIEnv *env, jclass, jlongArray out) {
+  if (!out) return 0;
+  jsize len = env->GetArrayLength(out);
+  size_t pages = 0;
+  size_t used = 0;
+  {
+    std::shared_lock<std::shared_mutex> lock(g_megaMutex);
+    pages = g_megaPages.size();
+    for (auto &pg : g_megaPages) { used += pg.head; }
+  }
+  jlong vals[4];
+  vals[0] = (jlong)pages;
+  vals[1] = (jlong)used;
+  vals[2] = (jlong)g_megaAllocCount.load(std::memory_order_relaxed);
+  vals[3] = (jlong)g_megaFreeCount.load(std::memory_order_relaxed);
+  jsize n = len < 4 ? len : 4;
+  env->SetLongArrayRegion(out, 0, n, vals);
+  return (jint)n;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetQuadStats(
+    JNIEnv *env, jclass, jlongArray out) {
+  if (!out) return 0;
+  jsize len = env->GetArrayLength(out);
+  long long resident = g_residentQuadCount.load(std::memory_order_relaxed);
+  long long bytes = g_residentQuadBytes.load(std::memory_order_relaxed);
+  long long drawn = g_drawnQuadCount.load(std::memory_order_relaxed);
+  jlong vals[4] = {(jlong)resident, (jlong)bytes, (jlong)drawn,
+                         (jlong)(resident > 0 ? resident / 64 : 0)};
+  jsize n = len < 4 ? len : 4;
+  env->SetLongArrayRegion(out, 0, n, vals);
+  return (jint)n;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

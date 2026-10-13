@@ -70,8 +70,8 @@ vertex EntityVertexOut vertex_entity(
                                     (int8_t)v.normal.z) / 127.0f);
     out.lightUV  = float2(v.lightUV) / 256.0;
     out.overlay  = float2(v.overlay.x, v.overlay.y);
-    out.fogSphCyl = float2(length(viewPos.xyz),
-        max(length(viewPos.xz), abs(viewPos.y)));
+    out.fogSphCyl = float2(length(pos),
+        max(length(pos.xz), abs(pos.y)));
     return out;
 }
 vertex EntityVertexOut vertex_entity_instanced(
@@ -96,8 +96,8 @@ vertex EntityVertexOut vertex_entity_instanced(
                                                                (int8_t)v.normal.z) / 127.0f, 0.0)).xyz);
     out.lightUV  = float2(v.lightUV) / 256.0;
     out.overlay  = inst.overlayParams.xy;
-    out.fogSphCyl = float2(length(viewPos.xyz),
-        max(length(viewPos.xz), abs(viewPos.y)));
+    out.fogSphCyl = float2(length(worldPos.xyz),
+        max(length(worldPos.xz), abs(worldPos.y)));
     return out;
 }
 fragment float4 fragment_entity(

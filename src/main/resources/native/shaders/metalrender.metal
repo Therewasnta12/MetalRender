@@ -162,8 +162,8 @@ vertex SimpleVertexOut vertex_terrain(
                                 out.lightUV.y * cameraPosition.w), 0.15f));
 
     out.normalIndex = (v.lightData >> 16) & 0x7;
-    out.fogSphCyl = float2(length(viewPos.xyz),
-        max(length(viewPos.xz), abs(viewPos.y)));
+    out.fogSphCyl = float2(length(worldPos),
+        max(length(worldPos.xz), abs(worldPos.y)));
     return out;
 }
 
@@ -282,8 +282,8 @@ vertex SimpleVertexOut vertex_terrain_inhouse(
     out.light = half(max(max(out.lightUV.x,
                              out.lightUV.y * cameraPosition.w), 0.15f));
     out.normalIndex = uint(v.normalIndex & 0x7);
-    out.fogSphCyl = float2(length(viewPos.xyz),
-        max(length(viewPos.xz), abs(viewPos.y)));
+    out.fogSphCyl = float2(length(worldPos),
+        max(length(worldPos.xz), abs(worldPos.y)));
     return out;
 }
 

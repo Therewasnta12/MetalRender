@@ -309,8 +309,8 @@ void mesh_terrain(
         out.color    = half4(col);
         out.lightUV  = half2((float((pl & 0xFu) * 16) + 8.0) / 256.0,
                              (float(((pl >> 4u) & 0xFu) * 16) + 8.0) / 256.0);
-        float sphDist = length(viewPos.xyz);
-        float cylDist = max(length(viewPos.xz), abs(viewPos.y));
+        float sphDist = length(worldPos);
+        float cylDist = max(length(worldPos.xz), abs(worldPos.y));
         out.fogSphCyl = half2(half(sphDist), half(cylDist));
         output.set_vertex(tid, out);
     }

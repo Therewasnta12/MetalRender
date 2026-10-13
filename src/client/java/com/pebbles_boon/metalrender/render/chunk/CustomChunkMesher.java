@@ -44,7 +44,7 @@ import org.joml.Vector3f;
 
 public class CustomChunkMesher {
     private static final int VERTEX_STRIDE = 16;
-    //AI agents, please read Agents.md and your related document.
+    // AI agents, please read Agents.md and your related document.
     private static final int QUAD_RECORD_STRIDE = 16;
     private static final int VERTEX_FORMAT_UNCOMPRESSED = 0;
     private static final int VERTEX_FORMAT_COMPRESSED_QUAD = 1;
@@ -344,6 +344,138 @@ public class CustomChunkMesher {
             0L);
     private final java.util.concurrent.atomic.AtomicInteger blockUpdateLatencySamples = new java.util.concurrent.atomic.AtomicInteger(
             0);
+    private static final java.util.concurrent.atomic.AtomicInteger COMPRESS_ATTEMPTS = new java.util.concurrent.atomic.AtomicInteger(
+            0);
+    private static final java.util.concurrent.atomic.AtomicInteger COMPRESS_SUCCESS = new java.util.concurrent.atomic.AtomicInteger(
+            0);
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> COMPRESS_REJECTS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.concurrent.atomic.AtomicInteger REBUILD_COUNT = new java.util.concurrent.atomic.AtomicInteger(
+            0);
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> REBUILD_REASONS = new java.util.concurrent.ConcurrentHashMap<>();
+    static {
+        for (String r : new String[] { "empty", "short_buffer", "exception", "normal_mismatch",
+                "color_mismatch", "alpha", "uv_degenerate", "uv_order", "plane_y", "plane_y_size",
+                "grid_y", "bounds_y", "plane_x", "plane_x_size", "grid_x", "overlay_x", "bounds_x",
+                "plane_z", "plane_z_size", "grid_z", "overlay_z", "bounds_z", "bounds", "size",
+                "position", "dirty", "content_changed", "mark_all_dirty" }) {
+            COMPRESS_REJECTS.put(r, new java.util.concurrent.atomic.AtomicInteger());
+            REBUILD_REASONS.put(r, new java.util.concurrent.atomic.AtomicInteger());
+        }
+    }
+    private final java.util.concurrent.atomic.AtomicLong residentQuadBytesAcc = new java.util.concurrent.atomic.AtomicLong(
+            0L);
+    private final java.util.concurrent.atomic.AtomicLong totalQuadCountAcc = new java.util.concurrent.atomic.AtomicLong(
+            0L);
+
+    private static void noteCompressReject(String reason) {
+        java.util.concurrent.atomic.AtomicInteger c = COMPRESS_REJECTS.get(reason);
+        if (c != null)
+            c.incrementAndGet();
+    }
+
+    public static int getCompressAttempts() {
+        return COMPRESS_ATTEMPTS.get();
+    }
+
+    public static int getCompressSuccess() {
+        return COMPRESS_SUCCESS.get();
+    }
+
+    public static java.util.Map<String, Integer> getCompressRejectCounts() {
+        java.util.HashMap<String, Integer> out = new java.util.HashMap<>();
+        for (var e : COMPRESS_REJECTS.entrySet()) {
+            out.put(e.getKey(), e.getValue().get());
+        }
+        return out;
+    }
+
+    public static int getRebuildCount() {
+        return REBUILD_COUNT.get();
+    }
+
+    public static java.util.Map<String, Integer> getRebuildReasonCounts() {
+        java.util.HashMap<String, Integer> out = new java.util.HashMap<>();
+        for (var e : REBUILD_REASONS.entrySet()) {
+            out.put(e.getKey(), e.getValue().get());
+        }
+        return out;
+    }
+
+    public static void noteRebuild(String reason) {
+        REBUILD_COUNT.incrementAndGet();
+        if (reason != null) {
+            java.util.concurrent.atomic.AtomicInteger c = REBUILD_REASONS.get(reason);
+            if (c != null)
+                c.incrementAndGet();
+        }
+    }
+
+    public static void noteRebuildBulk(String reason, int count) {
+        if (count <= 0)
+            return;
+        REBUILD_COUNT.addAndGet(count);
+        if (reason != null) {
+            java.util.concurrent.atomic.AtomicInteger c = REBUILD_REASONS.get(reason);
+            if (c != null)
+                c.addAndGet(count);
+        }
+    }
+
+    public double getBuilderBusyPct() {
+        int total = immediateThreadCount + backgroundThreadCount;
+        if (total <= 0)
+            return 0.0;
+        return 100.0 * getBuilderActiveCount() / (double) total;
+    }
+
+    public double getImmediateBusyPct() {
+        if (immediateThreadCount <= 0 || immediatePool == null)
+            return 0.0;
+        return 100.0 * immediatePool.getActiveCount() / (double) immediateThreadCount;
+    }
+
+    public double getBackgroundBusyPct() {
+        if (backgroundThreadCount <= 0 || backgroundPool == null)
+            return 0.0;
+        return 100.0 * backgroundPool.getActiveCount() / (double) backgroundThreadCount;
+    }
+
+    public long getResidentQuadBytes() {
+        return residentQuadBytesAcc.get();
+    }
+
+    public long getTotalQuadCount() {
+        return totalQuadCountAcc.get();
+    }
+
+    public double getQuadsPerColumn() {
+        long quads = totalQuadCountAcc.get();
+        if (quads <= 0)
+            return 0.0;
+        LongOpenHashSet columns;
+        synchronized (meshCache) {
+            columns = new LongOpenHashSet(meshCache.size());
+            for (var e : meshCache.values()) {
+                if (e == null)
+                    continue;
+                columns.add((((long) e.chunkX) << 32) | (e.chunkZ & 0xFFFFFFFFL));
+            }
+        }
+        if (columns.isEmpty())
+            return 0.0;
+        return (double) quads / (double) columns.size();
+    }
+
+    public int getDrawnQuadCount() {
+        try {
+            long[] out = new long[4];
+            int n = NativeBridge.nGetQuadStats(out);
+            if (n >= 3)
+                return (int) Math.max(0L, out[2]);
+        } catch (Throwable ignored) {
+        }
+        return (int) Math.min(Integer.MAX_VALUE, totalQuadCountAcc.get());
+    }
 
     public CustomChunkMesher() {
         this.meshCache = new Long2ObjectOpenHashMap<>();
@@ -458,9 +590,14 @@ public class CustomChunkMesher {
                 }
                 refreshThreadLocalCachesIfNeeded();
                 MeshBuildContext context = captureBuildContext(world, chunkX, chunkY, chunkZ);
-                int lodTier = lodTierForDistance(Math.max(
+                int chunkDist = Math.max(
                         Math.abs(chunkX - context.buildPlayerCX),
-                        Math.abs(chunkZ - context.buildPlayerCZ)));
+                        Math.abs(chunkZ - context.buildPlayerCZ));
+                int lodTier = lodTierForDistance(chunkDist);
+                int prefetchLod = lodTierForDistance(Math.max(0, chunkDist - 1));
+                if (prefetchLod < lodTier) {
+                    lodTier = prefetchLod;
+                }
                 lodTier = applyLodTierOverride(key, lodTier);
 
                 SectionSnapshot snapshot = captureSectionSnapshot(world, chunkX, chunkY, chunkZ, lodTier);
@@ -594,6 +731,10 @@ public class CustomChunkMesher {
     }
 
     public void markDirty(int cx, int cy, int cz) {
+        markDirtyWithReason(cx, cy, cz, "dirty");
+    }
+
+    public void markDirtyWithReason(int cx, int cy, int cz, String reason) {
         DIAG_MARKDIRTY.incrementAndGet();
         long key = packChunkKey(cx, cy, cz);
         boolean newlyDirty;
@@ -603,6 +744,7 @@ public class CustomChunkMesher {
         if (!newlyDirty) {
             return;
         }
+        noteRebuild(reason);
         synchronized (emptyKeys) {
             emptyKeys.remove(key);
         }
@@ -621,7 +763,7 @@ public class CustomChunkMesher {
             contentEpochByKey.put(key, contentEpochByKey.get(key) + 1L);
             destroyStashForKeyLocked(key);
         }
-        markDirty(cx, cy, cz);
+        markDirtyWithReason(cx, cy, cz, "content_changed");
     }
 
     public static long hashDataLayer(net.minecraft.world.level.chunk.DataLayer layer) {
@@ -872,6 +1014,7 @@ public class CustomChunkMesher {
             for (long k : emptyArr)
                 dirtyGeneration.put(k, dirtyGeneration.get(k) + 1L);
         }
+        noteRebuildBulk("mark_all_dirty", keys.length + emptyArr.length);
     }
 
     public void removeMesh(int cx, int cy, int cz) {
@@ -893,6 +1036,8 @@ public class CustomChunkMesher {
             NativeBridge.nDestroyBuffer(old.bufferHandle);
             meshCountAtomic.decrementAndGet();
             vertexCountAtomic.addAndGet(-old.quadCount * 4);
+            totalQuadCountAcc.addAndGet(-(long) old.quadCount);
+            residentQuadBytesAcc.addAndGet(-(long) old.quadCount * 4L * 16L);
         }
         synchronized (emptyKeys) {
             emptyKeys.remove(key);
@@ -926,6 +1071,8 @@ public class CustomChunkMesher {
             meshCache.clear();
             meshCountAtomic.set(0);
             vertexCountAtomic.set(0);
+            totalQuadCountAcc.set(0);
+            residentQuadBytesAcc.set(0);
         }
         synchronized (pendingKeys) {
             pendingKeys.clear();
@@ -1237,6 +1384,8 @@ public class CustomChunkMesher {
             NativeBridge.nDestroyBuffer(old.bufferHandle);
             meshCountAtomic.decrementAndGet();
             vertexCountAtomic.addAndGet(-old.quadCount * 4);
+            totalQuadCountAcc.addAndGet(-(long) old.quadCount);
+            residentQuadBytesAcc.addAndGet(-(long) old.quadCount * 4L * 16L);
         }
         synchronized (emptyKeys) {
             emptyKeys.add(key);
@@ -1775,50 +1924,50 @@ public class CustomChunkMesher {
                     if (!needLight) {
                         paddedLight[pIdx] = 0;
                     } else {
-                    int sectionX = wx >> 4;
-                    int sectionY = wy >> 4;
-                    int sectionZ = wz >> 4;
-                    int layerIdx = ((sectionY - chunkY + 1) * 3 + (sectionZ - chunkZ + 1)) * 3 +
-                            (sectionX - chunkX + 1);
-                    int bl;
-                    int sl;
-                    if (layerIdx < 0 || layerIdx >= 27) {
-                        bl = blockLightListener.getLightValue(mutablePos);
-                        sl = skyLightListener.getLightValue(mutablePos);
-                    } else {
-                        if (!lightLayerResolved[layerIdx]) {
-                            net.minecraft.core.SectionPos sectionPos = net.minecraft.core.SectionPos.of(sectionX,
-                                    sectionY,
-                                    sectionZ);
-                            blockLightLayers[layerIdx] = blockLightListener.getDataLayerData(sectionPos);
-                            skyLightLayers[layerIdx] = skyLightListener.getDataLayerData(sectionPos);
-                            lightLayerResolved[layerIdx] = true;
+                        int sectionX = wx >> 4;
+                        int sectionY = wy >> 4;
+                        int sectionZ = wz >> 4;
+                        int layerIdx = ((sectionY - chunkY + 1) * 3 + (sectionZ - chunkZ + 1)) * 3 +
+                                (sectionX - chunkX + 1);
+                        int bl;
+                        int sl;
+                        if (layerIdx < 0 || layerIdx >= 27) {
+                            bl = blockLightListener.getLightValue(mutablePos);
+                            sl = skyLightListener.getLightValue(mutablePos);
+                        } else {
+                            if (!lightLayerResolved[layerIdx]) {
+                                net.minecraft.core.SectionPos sectionPos = net.minecraft.core.SectionPos.of(sectionX,
+                                        sectionY,
+                                        sectionZ);
+                                blockLightLayers[layerIdx] = blockLightListener.getDataLayerData(sectionPos);
+                                skyLightLayers[layerIdx] = skyLightListener.getDataLayerData(sectionPos);
+                                lightLayerResolved[layerIdx] = true;
+                            }
+                            net.minecraft.world.level.chunk.DataLayer blockLayer = blockLightLayers[layerIdx];
+                            net.minecraft.world.level.chunk.DataLayer skyLayer = skyLightLayers[layerIdx];
+                            bl = blockLayer != null ? blockLayer.get(wx & 15, wy & 15, wz & 15)
+                                    : blockLightListener.getLightValue(mutablePos);
+                            sl = skyLayer != null ? skyLayer.get(wx & 15, wy & 15, wz & 15)
+                                    : skyLightListener.getLightValue(mutablePos);
                         }
-                        net.minecraft.world.level.chunk.DataLayer blockLayer = blockLightLayers[layerIdx];
-                        net.minecraft.world.level.chunk.DataLayer skyLayer = skyLightLayers[layerIdx];
-                        bl = blockLayer != null ? blockLayer.get(wx & 15, wy & 15, wz & 15)
-                                : blockLightListener.getLightValue(mutablePos);
-                        sl = skyLayer != null ? skyLayer.get(wx & 15, wy & 15, wz & 15)
-                                : skyLightListener.getLightValue(mutablePos);
-                    }
-                    if (checkStaleLight && bl == 0 && sl == 0 && stateId == 0
-                            && px > 0 && px < PADDED_SIZE - 1
-                            && py > 0 && py < PADDED_SIZE - 1
-                            && pz > 0 && pz < PADDED_SIZE - 1
-                            && paddedBlockStates[pIdx - 1] == 0
-                            && paddedBlockStates[pIdx + 1] == 0
-                            && paddedBlockStates[pIdx - PADDED_SIZE] == 0
-                            && paddedBlockStates[pIdx + PADDED_SIZE] == 0
-                            && paddedBlockStates[pIdx - PADDED_SIZE * PADDED_SIZE] == 0
-                            && paddedBlockStates[pIdx + PADDED_SIZE * PADDED_SIZE] == 0) {
-                        int liveBl = blockLightListener.getLightValue(mutablePos);
-                        int liveSl = skyLightListener.getLightValue(mutablePos);
-                        if (liveBl != 0 || liveSl != 0) {
-                            bl = liveBl;
-                            sl = liveSl;
+                        if (checkStaleLight && bl == 0 && sl == 0 && stateId == 0
+                                && px > 0 && px < PADDED_SIZE - 1
+                                && py > 0 && py < PADDED_SIZE - 1
+                                && pz > 0 && pz < PADDED_SIZE - 1
+                                && paddedBlockStates[pIdx - 1] == 0
+                                && paddedBlockStates[pIdx + 1] == 0
+                                && paddedBlockStates[pIdx - PADDED_SIZE] == 0
+                                && paddedBlockStates[pIdx + PADDED_SIZE] == 0
+                                && paddedBlockStates[pIdx - PADDED_SIZE * PADDED_SIZE] == 0
+                                && paddedBlockStates[pIdx + PADDED_SIZE * PADDED_SIZE] == 0) {
+                            int liveBl = blockLightListener.getLightValue(mutablePos);
+                            int liveSl = skyLightListener.getLightValue(mutablePos);
+                            if (liveBl != 0 || liveSl != 0) {
+                                bl = liveBl;
+                                sl = liveSl;
+                            }
                         }
-                    }
-                    paddedLight[pIdx] = (byte) ((bl & 0xF) | ((sl & 0xF) << 4));
+                        paddedLight[pIdx] = (byte) ((bl & 0xF) | ((sl & 0xF) << 4));
                     }
 
                     if (inner) {
@@ -1964,6 +2113,7 @@ public class CustomChunkMesher {
         final ClientLevel world;
         final BlockPos pos;
         final net.minecraft.client.color.block.BlockColors colors;
+
         SnapshotPalette(Object2IntOpenHashMap<BlockState> idCache,
                 IdentityHashMap<BlockState, Byte> occCache,
                 IdentityHashMap<BlockState, Byte> shadeCache,
@@ -1980,6 +2130,7 @@ public class CustomChunkMesher {
             this.pos = pos;
             this.colors = colors;
         }
+
         int indexFor(BlockState state) {
             Integer existing = index.get(state);
             if (existing != null) {
@@ -2139,6 +2290,7 @@ public class CustomChunkMesher {
             return idx;
         }
     }
+
     private static final ThreadLocal<Object2IntOpenHashMap<BlockState>> BS_ID_CACHE = ThreadLocal.withInitial(() -> {
         Object2IntOpenHashMap<BlockState> m = new Object2IntOpenHashMap<>(8192);
         m.defaultReturnValue(-1);
@@ -2284,15 +2436,18 @@ public class CustomChunkMesher {
                 meshShadersOn = false;
             }
             if (meshShadersOn && opaqueQuadCount > 0) {
+                COMPRESS_ATTEMPTS.incrementAndGet();
                 try {
                     ByteBuffer srcDup = vertexHolder.buf.duplicate();
                     srcDup.position(0);
                     srcDup.limit(opaqueBytesUncompressed);
                     compressedOpaque = tryCompressOpaqueQuads(srcDup, opaqueQuadCount);
                 } catch (Exception ignored) {
+                    noteCompressReject("exception");
                     compressedOpaque = null;
                 }
                 if (compressedOpaque != null) {
+                    COMPRESS_SUCCESS.incrementAndGet();
                     opaqueFormat = VERTEX_FORMAT_COMPRESSED_QUAD;
                     opaqueBytes = opaqueQuadCount * QUAD_RECORD_STRIDE;
                 }
@@ -2380,9 +2535,13 @@ public class CustomChunkMesher {
                 DIAG_NEW.incrementAndGet();
                 meshCountAtomic.incrementAndGet();
                 vertexCountAtomic.addAndGet(mesh.quadCount * 4);
+                totalQuadCountAcc.addAndGet(mesh.quadCount);
+                residentQuadBytesAcc.addAndGet((long) roundedSize);
             } else {
                 DIAG_REPLACE.incrementAndGet();
                 vertexCountAtomic.addAndGet(mesh.quadCount * 4 - old.quadCount * 4);
+                totalQuadCountAcc.addAndGet((long) mesh.quadCount - (long) old.quadCount);
+                residentQuadBytesAcc.addAndGet((long) (mesh.quadCount - old.quadCount) * 4L * 16L);
             }
 
             int flushCount = -1;
@@ -3995,11 +4154,16 @@ public class CustomChunkMesher {
         return (byte) (w1 >>> 56);
     }
 
+    private static ByteBuffer rejectCompress(String reason) {
+        noteCompressReject(reason);
+        return null;
+    }
+
     private static ByteBuffer tryCompressOpaqueQuads(ByteBuffer src, int opaqueQuadCount) {
         if (src == null || opaqueQuadCount <= 0)
-            return null;
+            return rejectCompress("empty");
         if (src.limit() < opaqueQuadCount * 4 * VERTEX_STRIDE)
-            return null;
+            return rejectCompress("short_buffer");
         ByteBuffer out = ByteBuffer.allocateDirect(opaqueQuadCount * QUAD_RECORD_STRIDE)
                 .order(ByteOrder.nativeOrder());
         for (int q = 0; q < opaqueQuadCount; q++) {
@@ -4018,7 +4182,7 @@ public class CustomChunkMesher {
             int n2 = (int) ((w1_2 >>> 56) & 0xFF);
             int n3 = (int) ((w1_3 >>> 56) & 0xFF);
             if (n0 < 0 || n0 > 5 || n1 != n0 || n2 != n0 || n3 != n0)
-                return null;
+                return rejectCompress("normal_mismatch");
             int normal = n0;
 
             int r0 = (int) ((w1_0 >>> 16) & 0xFF);
@@ -4042,13 +4206,13 @@ public class CustomChunkMesher {
             int a3 = (int) ((w1_3 >>> 40) & 0xFF);
             int l3 = (int) ((w1_3 >>> 48) & 0xFF);
             if (r1 != r0 || g1 != g0 || b1 != b0 || a1 != a0 || l1 != l0)
-                return null;
+                return rejectCompress("color_mismatch");
             if (r2 != r0 || g2 != g0 || b2 != b0 || a2 != a0 || l2 != l0)
-                return null;
+                return rejectCompress("color_mismatch");
             if (r3 != r0 || g3 != g0 || b3 != b0 || a3 != a0 || l3 != l0)
-                return null;
+                return rejectCompress("color_mismatch");
             if (a0 != 0xFF && a0 != 0xFE)
-                return null;
+                return rejectCompress("alpha");
 
             int px0 = (short) (w0_0 & 0xFFFF);
             int py0 = (short) ((w0_0 >> 16) & 0xFFFF);
@@ -4076,19 +4240,19 @@ public class CustomChunkMesher {
             int vMin = Math.min(Math.min(v0, v1), Math.min(v2, v3));
             int vMax = Math.max(Math.max(v0, v1), Math.max(v2, v3));
             if (uMin == uMax || vMin == vMax)
-                return null;
+                return rejectCompress("uv_degenerate");
             if (u0 != (UV_PAT[0][0] == 0 ? uMin : uMax)
                     || v0 != (UV_PAT[0][1] == 0 ? vMin : vMax))
-                return null;
+                return rejectCompress("uv_order");
             if (u1 != (UV_PAT[1][0] == 0 ? uMin : uMax)
                     || v1 != (UV_PAT[1][1] == 0 ? vMin : vMax))
-                return null;
+                return rejectCompress("uv_order");
             if (u2 != (UV_PAT[2][0] == 0 ? uMin : uMax)
                     || v2 != (UV_PAT[2][1] == 0 ? vMin : vMax))
-                return null;
+                return rejectCompress("uv_order");
             if (u3 != (UV_PAT[3][0] == 0 ? uMin : uMax)
                     || v3 != (UV_PAT[3][1] == 0 ? vMin : vMax))
-                return null;
+                return rejectCompress("uv_order");
 
             int minX = Math.min(Math.min(px0, px1), Math.min(px2, px3));
             int maxX = Math.max(Math.max(px0, px1), Math.max(px2, px3));
@@ -4102,18 +4266,18 @@ public class CustomChunkMesher {
             int[] pat = FACE_VERTS[normal];
             if (normal == 0 || normal == 1) {
                 if (minY != maxY)
-                    return null;
+                    return rejectCompress("plane_y");
                 if (minX == maxX || minZ == maxZ)
-                    return null;
+                    return rejectCompress("plane_y_size");
                 if ((minX & 255) != 0 || (maxX & 255) != 0
                         || (minZ & 255) != 0 || (maxZ & 255) != 0)
-                    return null;
+                    return rejectCompress("grid_y");
                 if ((minY & 255) != 0)
-                    return null;
+                    return rejectCompress("grid_y");
                 int plane = minY;
                 int expectedBy = (normal == 1) ? (plane / 256 - 1) : (plane / 256);
                 if (expectedBy < 0 || expectedBy > 15)
-                    return null;
+                    return rejectCompress("bounds_y");
                 bx = minX / 256;
                 by = expectedBy;
                 bz = minZ / 256;
@@ -4121,12 +4285,12 @@ public class CustomChunkMesher {
                 h = (maxZ - minZ) / 256;
             } else if (normal == 4 || normal == 5) {
                 if (minX != maxX)
-                    return null;
+                    return rejectCompress("plane_x");
                 if (minY == maxY || minZ == maxZ)
-                    return null;
+                    return rejectCompress("plane_x_size");
                 if ((minY & 255) != 0 || (maxY & 255) != 0
                         || (minZ & 255) != 0 || (maxZ & 255) != 0)
-                    return null;
+                    return rejectCompress("grid_x");
                 int plane = minX;
                 int rem = plane & 255;
                 int planeMod = ((plane % 256) + 256) % 256;
@@ -4140,28 +4304,28 @@ public class CustomChunkMesher {
                     overlay = 1;
                     basePlane = plane + 1;
                 } else {
-                    return null;
+                    return rejectCompress("overlay_x");
                 }
                 int expectedBx = (normal == 5) ? (basePlane / 256 - 1) : (basePlane / 256);
                 if (expectedBx < 0 || expectedBx > 15)
-                    return null;
+                    return rejectCompress("bounds_x");
                 if ((basePlane & 255) != 0)
-                    return null;
+                    return rejectCompress("grid_x");
                 bx = expectedBx;
                 by = minY / 256;
                 bz = minZ / 256;
                 w = (maxZ - minZ) / 256;
                 h = (maxY - minY) / 256;
                 if (rem != 0 && overlay == 0)
-                    return null;
+                    return rejectCompress("overlay_x");
             } else {
                 if (minZ != maxZ)
-                    return null;
+                    return rejectCompress("plane_z");
                 if (minX == maxX || minY == maxY)
-                    return null;
+                    return rejectCompress("plane_z_size");
                 if ((minX & 255) != 0 || (maxX & 255) != 0
                         || (minY & 255) != 0 || (maxY & 255) != 0)
-                    return null;
+                    return rejectCompress("grid_z");
                 int plane = minZ;
                 int planeMod = ((plane % 256) + 256) % 256;
                 int basePlane = plane;
@@ -4174,13 +4338,13 @@ public class CustomChunkMesher {
                     overlay = 1;
                     basePlane = plane + 1;
                 } else {
-                    return null;
+                    return rejectCompress("overlay_z");
                 }
                 int expectedBz = (normal == 3) ? (basePlane / 256 - 1) : (basePlane / 256);
                 if (expectedBz < 0 || expectedBz > 15)
-                    return null;
+                    return rejectCompress("bounds_z");
                 if ((basePlane & 255) != 0)
-                    return null;
+                    return rejectCompress("grid_z");
                 bx = minX / 256;
                 by = minY / 256;
                 bz = expectedBz;
@@ -4188,11 +4352,11 @@ public class CustomChunkMesher {
                 h = (maxY - minY) / 256;
             }
             if (bx < 0 || bx > 15 || by < 0 || by > 15 || bz < 0 || bz > 15)
-                return null;
+                return rejectCompress("bounds");
             if (w < 1 || w > 16 || h < 1 || h > 16)
-                return null;
+                return rejectCompress("size");
             if (bx + (normal == 1 || normal == 0 || normal == 3 || normal == 2 ? w : 0) > 16)
-                return null;
+                return rejectCompress("bounds");
             int[] pxA = { px0, px1, px2, px3 };
             int[] pyA = { py0, py1, py2, py3 };
             int[] pzA = { pz0, pz1, pz2, pz3 };
@@ -4201,7 +4365,7 @@ public class CustomChunkMesher {
                 int ey = (pat[j * 3 + 1] == 0) ? minY : maxY;
                 int ez = (pat[j * 3 + 2] == 0) ? minZ : maxZ;
                 if (pxA[j] != ex || pyA[j] != ey || pzA[j] != ez)
-                    return null;
+                    return rejectCompress("position");
             }
 
             int leavesBit = (a0 == 0xFE) ? 1 : 0;

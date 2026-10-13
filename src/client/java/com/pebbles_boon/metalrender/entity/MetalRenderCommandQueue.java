@@ -803,8 +803,8 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
             if (mc == null || mc.getBlockColors() == null) {
                 return 0xFFFFFFFF;
             }
-            net.minecraft.client.color.block.BlockTintSource source =
-                    mc.getBlockColors().getTintSource(blockState, tintIndex);
+            net.minecraft.client.color.block.BlockTintSource source = mc.getBlockColors().getTintSource(blockState,
+                    tintIndex);
             if (source == null) {
                 return 0xFFFFFFFF;
             }

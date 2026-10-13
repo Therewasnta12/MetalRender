@@ -46,6 +46,27 @@ public final class MetalRenderProfiler {
     private final AtomicLong uploadTimeAccNs = new AtomicLong(0);
     private final AtomicLong cullTimeAccNs = new AtomicLong(0);
 
+    private static final class SubMs {
+        private final AtomicLong accNs = new AtomicLong();
+
+        void add(long ns) {
+            if (ns > 0)
+                accNs.addAndGet(ns);
+        }
+
+        double drainMs() {
+            return accNs.getAndSet(0) / 1_000_000.0;
+        }
+    }
+
+    private final SubMs scanTimer = new SubMs();
+    private final SubMs lodTimer = new SubMs();
+    private final SubMs drawPrepTimer = new SubMs();
+    private final SubMs atlasTimer = new SubMs();
+    private final SubMs lightmapTimer = new SubMs();
+    private final SubMs nativeDrawPrepTimer = new SubMs();
+    private final SubMs javaRenderTimer = new SubMs();
+
     private final AtomicInteger meshesBuiltAcc = new AtomicInteger(0);
     private final AtomicInteger uploadsDoneAcc = new AtomicInteger(0);
     private final AtomicInteger chunksScannedAcc = new AtomicInteger(0);
@@ -66,8 +87,16 @@ public final class MetalRenderProfiler {
     private long lastLogTimeMs;
     private long lastCsvEmitMs;
     private long lastSnapshotUpdateMs;
-    private static final String CSV_HEADER = "epoch_ms,frame_ms,mesh_ms,upload_ms,cull_ms," +
-            "meshes_built,chunks_drawn,meshes,pending,vertex_count,builder_pool,queued,gpu_ms";
+    private static final String CSV_HEADER = "epoch_ms,frame_ms,mesh_ms,upload_ms,cull_ms,"
+            + "scan_ms,lod_ms,draw_prep_ms,atlas_ms,lightmap_ms,native_draw_prep_ms,java_render_ms,"
+            + "meshes_built,chunks_drawn,meshes,pending,vertex_count,builder_pool,queued,"
+            + "builder_busy_pct,builder_imm_busy_pct,builder_bg_busy_pct,rebuild_count,rebuild_reasons,"
+            + "blit_wait_ms,blit_bind_ms,blit_copy_ms,blit_quad_ms,blit_gl_gpu_ms,"
+            + "native_wait_render_ms,native_cgl_bind_ms,"
+            + "pass_opaque_ms,pass_cutout_ms,pass_translucent_ms,pass_hiz_ms,pass_composite_ms,"
+            + "mega_pages,mega_used_bytes,mega_allocs,mega_frees,"
+            + "compress_attempts,compress_success,compress_rejects,"
+            + "quads_per_column,resident_quad_bytes,drawn_quads,gpu_ms";
 
     private MetalRenderProfiler() {
     }
@@ -154,6 +183,34 @@ public final class MetalRenderProfiler {
             cullTimeAccNs.addAndGet(nanos);
     }
 
+    public void recordScanTime(long n) {
+        scanTimer.add(n);
+    }
+
+    public void recordLodTime(long n) {
+        lodTimer.add(n);
+    }
+
+    public void recordDrawPrepTime(long n) {
+        drawPrepTimer.add(n);
+    }
+
+    public void recordAtlasTime(long n) {
+        atlasTimer.add(n);
+    }
+
+    public void recordLightmapTime(long n) {
+        lightmapTimer.add(n);
+    }
+
+    public void recordNativeDrawPrepTime(long n) {
+        nativeDrawPrepTimer.add(n);
+    }
+
+    public void recordJavaRenderTime(long n) {
+        javaRenderTimer.add(n);
+    }
+
     public void incrementMeshesBuilt(int count) {
         if (count > 0)
             meshesBuiltAcc.addAndGet(count);
@@ -189,6 +246,13 @@ public final class MetalRenderProfiler {
         double meshMs = meshTimeAccNs.getAndSet(0) / 1_000_000.0;
         double uploadMs = uploadTimeAccNs.getAndSet(0) / 1_000_000.0;
         double cullMs = cullTimeAccNs.getAndSet(0) / 1_000_000.0;
+        double scanMs = scanTimer.drainMs();
+        double lodMs = lodTimer.drainMs();
+        double drawPrepMs = drawPrepTimer.drainMs();
+        double atlasMs = atlasTimer.drainMs();
+        double lightmapMs = lightmapTimer.drainMs();
+        double nativeDrawPrepMs = nativeDrawPrepTimer.drainMs();
+        double javaRenderMs = javaRenderTimer.drainMs();
         double gpuMs = 0.0;
         try {
             gpuMs = NativeBridge.nGetGpuFrameTimeMs();
@@ -245,31 +309,158 @@ public final class MetalRenderProfiler {
                 nowMs - lastCsvEmitMs >= 1000L) {
             lastCsvEmitMs = nowMs;
             emitCsvSample(nowMs, frameMs, meshMs, uploadMs, cullMs,
+                    scanMs, lodMs, drawPrepMs, atlasMs, lightmapMs,
+                    nativeDrawPrepMs, javaRenderMs,
                     meshesBuilt, chunksDrawn, wrForCsv, gpuMs);
         }
     }
 
     private void emitCsvSample(long tsMs, double frameMs, double meshMs,
             double uploadMs, double cullMs,
+            double scanMs, double lodMs, double drawPrepMs, double atlasMs, double lightmapMs,
+            double nativeDrawPrepMs, double javaRenderMs,
             int meshesBuilt, int chunksDrawn, MetalWorldRenderer wr,
             double gpuMs) {
         ensureCsvWorker();
         CustomChunkMesherAccess access = CustomChunkMesherAccess.of(wr);
-        StringBuilder sb = new StringBuilder(256);
-        sb.append(tsMs).append(',')
-                .append(fmt(frameMs)).append(',')
-                .append(fmt(meshMs)).append(',')
-                .append(fmt(uploadMs)).append(',')
-                .append(fmt(cullMs)).append(',')
-                .append(meshesBuilt).append(',')
-                .append(chunksDrawn).append(',')
-                .append(access.meshCount).append(',')
-                .append(access.pendingCount).append(',')
-                .append(access.vertexCount).append(',')
+        double blitWait = 0, blitBind = 0, blitCopy = 0, blitQuad = 0, blitGlGpu = 0;
+        try {
+            var blitter = wr.getBlitter();
+            if (blitter != null) {
+                blitWait = blitter.getLastBlitWaitMs();
+                blitBind = blitter.getLastCglBindMs();
+                blitCopy = blitter.getLastBlitCopyMs();
+                blitQuad = blitter.getLastBlitQuadMs();
+                blitGlGpu = blitter.getLastBlitGlGpuMs();
+            }
+        } catch (Throwable ignored) {
+        }
+        double nativeWaitRender = nativeDouble(() -> NativeBridge.nGetWaitRenderMs());
+        double nativeCglBind = nativeDouble(() -> NativeBridge.nGetCglBindMs());
+        double nativeDrawPrep = nativeDrawPrepMs;
+        double ndp = nativeDouble(() -> NativeBridge.nGetNativeDrawPrepMs());
+        if (ndp > 0.0)
+            nativeDrawPrep = ndp;
+        float[] passes = nativeFloats(5, out -> NativeBridge.nGetPassGpuMs(out));
+        long[] mega = nativeLongs(4, out -> NativeBridge.nGetMegaStats(out));
+        double quadsPerColumn = access.quadsPerColumn;
+        long residentQuadBytes = access.residentQuadBytes;
+        long drawnQuads = access.drawnQuads;
+        if (drawnQuads == 0) {
+            long[] q = nativeLongs(4, out -> NativeBridge.nGetQuadStats(out));
+            drawnQuads = q[2];
+            if (residentQuadBytes == 0)
+                residentQuadBytes = q[1];
+            if (quadsPerColumn == 0)
+                quadsPerColumn = q[3];
+        }
+        int compressAttempts = 0, compressSuccess = 0;
+        String compressRejects = "";
+        try {
+            compressAttempts = com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher
+                    .getCompressAttempts();
+            compressSuccess = com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher
+                    .getCompressSuccess();
+            compressRejects = formatCounts(com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher
+                    .getCompressRejectCounts());
+        } catch (Throwable ignored) {
+        }
+        int rebuildCount = 0;
+        String rebuildReasons = "";
+        try {
+            rebuildCount = com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher
+                    .getRebuildCount();
+            rebuildReasons = formatCounts(com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher
+                    .getRebuildReasonCounts());
+        } catch (Throwable ignored) {
+        }
+        double atlasOut = atlasMs > 0 ? atlasMs : access.atlasMs;
+        double lightmapOut = lightmapMs > 0 ? lightmapMs : access.lightmapMs;
+        double javaRenderOut = javaRenderMs > 0 ? javaRenderMs : access.javaRenderMs;
+        double scanOut = scanMs > 0 ? scanMs : access.scanMs;
+        double lodOut = lodMs > 0 ? lodMs : access.lodMs;
+        double drawPrepOut = drawPrepMs > 0 ? drawPrepMs : access.drawPrepMs;
+        StringBuilder sb = new StringBuilder(1024);
+        sb.append(tsMs).append(',').append(fmt(frameMs)).append(',').append(fmt(meshMs)).append(',')
+                .append(fmt(uploadMs)).append(',').append(fmt(cullMs)).append(',').append(fmt(scanOut)).append(',')
+                .append(fmt(lodOut)).append(',').append(fmt(drawPrepOut)).append(',').append(fmt(atlasOut)).append(',')
+                .append(fmt(lightmapOut)).append(',').append(fmt(nativeDrawPrep)).append(',').append(fmt(javaRenderOut))
+                .append(',')
+                .append(meshesBuilt).append(',').append(chunksDrawn).append(',').append(access.meshCount).append(',')
+                .append(access.pendingCount).append(',').append(access.vertexCount).append(',')
                 .append(access.builderActive).append(',')
-                .append(access.builderQueued).append(',')
+                .append(access.builderQueued).append(',').append(fmt(access.builderBusyPct)).append(',')
+                .append(fmt(access.builderImmBusyPct)).append(',')
+                .append(fmt(access.builderBgBusyPct)).append(',').append(rebuildCount).append(',').append('"')
+                .append(rebuildReasons).append('"').append(',')
+                .append(fmt(blitWait)).append(',').append(fmt(blitBind)).append(',').append(fmt(blitCopy)).append(',')
+                .append(fmt(blitQuad)).append(',').append(fmt(blitGlGpu)).append(',').append(fmt(nativeWaitRender))
+                .append(',')
+                .append(fmt(nativeCglBind)).append(',').append(fmt(passes[0])).append(',').append(fmt(passes[1]))
+                .append(',')
+                .append(fmt(passes[2])).append(',').append(fmt(passes[3])).append(',').append(fmt(passes[4]))
+                .append(',')
+                .append(mega[0]).append(',').append(mega[1]).append(',').append(mega[2]).append(',').append(mega[3])
+                .append(',')
+                .append(compressAttempts).append(',').append(compressSuccess).append(',').append('"')
+                .append(compressRejects).append('"').append(',')
+                .append(fmt(quadsPerColumn)).append(',').append(residentQuadBytes).append(',').append(drawnQuads)
+                .append(',')
                 .append(fmt(gpuMs)).append('\n');
         csvQueue.offer(sb.toString());
+    }
+
+    private interface DoubleNative {
+        double get();
+    }
+
+    private interface FloatArrayNative {
+        int fill(float[] out);
+    }
+
+    private interface LongArrayNative {
+        int fill(long[] out);
+    }
+
+    private static double nativeDouble(DoubleNative call) {
+        try {
+            return call.get();
+        } catch (Throwable ignored) {
+            return 0.0;
+        }
+    }
+
+    private static float[] nativeFloats(int size, FloatArrayNative call) {
+        float[] out = new float[size];
+        try {
+            call.fill(out);
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    private static long[] nativeLongs(int size, LongArrayNative call) {
+        long[] out = new long[size];
+        try {
+            call.fill(out);
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    private static String formatCounts(java.util.Map<String, Integer> counts) {
+        if (counts == null || counts.isEmpty())
+            return "";
+        java.util.ArrayList<String> keys = new java.util.ArrayList<>(counts.keySet());
+        java.util.Collections.sort(keys);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < keys.size(); i++) {
+            if (i > 0)
+                sb.append(';');
+            String k = keys.get(i);
+            sb.append(k).append('=').append(counts.get(k));
+        }
+        return sb.toString();
     }
 
     private static String fmt(double ms) {
@@ -361,30 +552,35 @@ public final class MetalRenderProfiler {
     }
 
     private static final class CustomChunkMesherAccess {
-        final int meshCount;
-        final int pendingCount;
-        final int vertexCount;
-        final int builderActive;
-        final int builderQueued;
-
-        private CustomChunkMesherAccess(int meshCount, int pendingCount,
-                int vertexCount, int builderActive, int builderQueued) {
-            this.meshCount = meshCount;
-            this.pendingCount = pendingCount;
-            this.vertexCount = vertexCount;
-            this.builderActive = builderActive;
-            this.builderQueued = builderQueued;
-        }
+        int meshCount, pendingCount, vertexCount, builderActive, builderQueued, drawnQuads;
+        long residentQuadBytes;
+        double builderBusyPct, builderImmBusyPct, builderBgBusyPct, quadsPerColumn;
+        double scanMs, lodMs, drawPrepMs, atlasMs, lightmapMs, javaRenderMs;
 
         static CustomChunkMesherAccess of(MetalWorldRenderer wr) {
+            CustomChunkMesherAccess a = new CustomChunkMesherAccess();
             try {
                 com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher m = wr.getChunkMesher();
-                return new CustomChunkMesherAccess(m.getMeshCount(), m.getPendingCount(),
-                        m.getTotalVertexCount(), m.getBuilderActiveCount(),
-                        m.getBuilderQueueDepth());
-            } catch (Throwable t) {
-                return new CustomChunkMesherAccess(0, 0, 0, 0, 0);
+                a.meshCount = m.getMeshCount();
+                a.pendingCount = m.getPendingCount();
+                a.vertexCount = m.getTotalVertexCount();
+                a.builderActive = m.getBuilderActiveCount();
+                a.builderQueued = m.getBuilderQueueDepth();
+                a.builderBusyPct = m.getBuilderBusyPct();
+                a.builderImmBusyPct = m.getImmediateBusyPct();
+                a.builderBgBusyPct = m.getBackgroundBusyPct();
+                a.quadsPerColumn = m.getQuadsPerColumn();
+                a.residentQuadBytes = m.getResidentQuadBytes();
+                a.drawnQuads = m.getDrawnQuadCount();
+                a.scanMs = wr.getLastScanMs();
+                a.lodMs = wr.getLastLodMs();
+                a.drawPrepMs = wr.getLastDrawPrepMs();
+                a.atlasMs = wr.getLastAtlasMs();
+                a.lightmapMs = wr.getLastLightmapMs();
+                a.javaRenderMs = wr.getLastJavaRenderMs();
+            } catch (Throwable ignored) {
             }
+            return a;
         }
     }
 

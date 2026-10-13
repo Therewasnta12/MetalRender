@@ -136,6 +136,14 @@ public class MetalWorldRenderer {
     private int frameCount;
     private int maxMeshes = DEFAULT_MAX_MESHES;
     private int lastDrawnChunkCount;
+    private volatile double lastScanMs;
+    private volatile double lastLodMs;
+    private volatile double lastPrepareCullMs;
+    private volatile double lastDrawPrepMs;
+    private volatile double lastAtlasMs;
+    private volatile double lastLightmapMs;
+    private volatile double lastNativeDrawPrepMs;
+    private volatile double lastJavaRenderMs;
     private long lastDiagLogMs;
     private long outlineBufferHandle;
     private long jBuildAcc;
@@ -506,11 +514,15 @@ public class MetalWorldRenderer {
         }
         if (MetalRenderClient.getConfig().enableMetalRendering) {
             long buildStart = System.nanoTime();
+            long lodStart = System.nanoTime();
             refreshLodRing(mc);
             if (frameCount % LOD_REFRESH_FRAME_INTERVAL == 0) {
                 refreshLodTiers(mc);
                 updateLodRecencyEviction(mc);
             }
+            long lodNs = System.nanoTime() - lodStart;
+            lastLodMs = lodNs / 1_000_000.0;
+            MetalRenderProfiler.getInstance().recordLodTime(lodNs);
 
             if (frameCount % 120 == 60 && mc.player != null) {
                 try {
@@ -520,8 +532,12 @@ public class MetalWorldRenderer {
                 } catch (Exception ignored) {
                 }
             }
+            long drawPrepStart = System.nanoTime();
             releaseDelayedBlockRebuilds();
             buildPendingChunkMeshes(mc);
+            long drawPrepNs = System.nanoTime() - drawPrepStart;
+            lastDrawPrepMs = drawPrepNs / 1_000_000.0;
+            MetalRenderProfiler.getInstance().recordDrawPrepTime(drawPrepNs);
             if ((frameCount % 240) == 0) {
                 try {
                     chunkMesher.pruneStaleLatencyMaps(System.nanoTime(), 30_000_000_000L);
@@ -557,6 +573,7 @@ public class MetalWorldRenderer {
 
     public void beginFrame(Camera camera, float tickDelta, Matrix4f projection,
             Matrix4f modelView, double cameraX, double cameraY, double cameraZ) {
+        long javaRenderStart = System.nanoTime();
         MetalRenderer renderer = MetalRenderClient.getRenderer();
         if (renderer == null || !renderer.isAvailable())
             return;
@@ -573,7 +590,9 @@ public class MetalWorldRenderer {
 
         long cullStart = System.nanoTime();
         frustumCuller.update(projectionMatrix, modelViewMatrix, camPos);
-        MetalRenderProfiler.getInstance().recordCullTime(System.nanoTime() - cullStart);
+        long cullNs = System.nanoTime() - cullStart;
+        MetalRenderProfiler.getInstance().recordCullTime(cullNs);
+        lastPrepareCullMs = cullNs / 1_000_000.0;
 
         boolean frustumStable = !cullingOrcreator.isActive();
         if (cullingOrcreator.isActive()) {
@@ -686,7 +705,11 @@ public class MetalWorldRenderer {
                 }
                 long ibHandle = chunkMesher.getGlobalIndexBuffer();
                 if (ibHandle != 0) {
+                    long drawPrepStart = System.nanoTime();
                     int drawn = NativeBridge.nDrawAllVisibleChunks(frameCtx, ibHandle);
+                    long nativeNs = System.nanoTime() - drawPrepStart;
+                    lastNativeDrawPrepMs = nativeNs / 1_000_000.0;
+                    MetalRenderProfiler.getInstance().recordNativeDrawPrepTime(nativeNs);
                     lastDrawnChunkCount = drawn;
                     MetalRenderProfiler.getInstance().incrementChunksDrawn(drawn);
                     if (frameCount < 10 || frameCount % 1000 == 0) {
@@ -698,6 +721,9 @@ public class MetalWorldRenderer {
                 }
             }
         }
+        long javaRenderNs = System.nanoTime() - javaRenderStart;
+        lastJavaRenderMs = javaRenderNs / 1_000_000.0;
+        MetalRenderProfiler.getInstance().recordJavaRenderTime(javaRenderNs);
     }
 
     private static void extractFrustumPlanes(Matrix4f vp, float[] out) {
@@ -1013,6 +1039,12 @@ public class MetalWorldRenderer {
         fogRenderEnd = fog.renderEnd();
     }
 
+    public String describeFogState() {
+        return String.format(java.util.Locale.ROOT,
+                "metal fog rgb=(%.3f,%.3f,%.3f) env=[%.1f,%.1f] render=[%.1f,%.1f]",
+                fogR, fogG, fogB, fogEnvStart, fogEnvEnd, fogRenderStart, fogRenderEnd);
+    }
+
     private final long[] lodRecencyKeys = new long[LOD_RECENCY_SCRATCH_SIZE];
     private final int[] lodRecencyFrames = new int[LOD_RECENCY_SCRATCH_SIZE];
     private final it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap lodRecencyAgeMap = new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap(
@@ -1113,7 +1145,11 @@ public class MetalWorldRenderer {
         }
         if (pendingBuildSet.size() < CHUNK_SCAN_SATURATED_THRESHOLD ||
                 (frameCount & 1) == 0) {
+            long scanStart = System.nanoTime();
             scanForPendingChunks(mc);
+            long scanNs = System.nanoTime() - scanStart;
+            lastScanMs = scanNs / 1_000_000.0;
+            MetalRenderProfiler.getInstance().recordScanTime(scanNs);
         }
         if (mc.player != null && chunkMesher.getMeshCount() < maxMeshes) {
             int playerChunkX = mc.player.chunkPosition().x();
@@ -1189,7 +1225,9 @@ public class MetalWorldRenderer {
         int playerSectionY = mc.player.getBlockY() >> 4;
         if (scanSaturated) {
             if ((frameCount % 10) == 0) {
-                trimPendingBuildSet(playerChunkX, playerChunkZ, closeRange);
+                int keep = Math.max(closeRange,
+                        scanFrontierRing + NORMAL_FRONTIER_RING_SCAN_SPAN);
+                trimPendingBuildSet(playerChunkX, playerChunkZ, keep);
                 visibleBacklog = pendingBuildSet.size() + mesherPending;
                 scanPressured = visibleBacklog >= CHUNK_SCAN_PRESSURE_THRESHOLD;
                 scanSaturated = visibleBacklog >= CHUNK_SCAN_SATURATED_THRESHOLD;
@@ -1228,7 +1266,9 @@ public class MetalWorldRenderer {
         } else {
             boolean queuePressure = !pendingBuildSet.isEmpty() || chunkMesher.getPendingCount() > 0;
             boolean needScan = scanDirty || playerMovedChunk || queuePressure;
-            if (!needScan) {
+            boolean idleFrontierDue = !needScan && (scanFrameCounter % 8 == 0)
+                    && scanFrontierRing <= renderDist;
+            if (!needScan && !idleFrontierDue) {
                 if (turnPriorityFrames > 0 && !scanPressured) {
                     scanForwardSector(world, playerChunkX, playerChunkZ, playerSectionY,
                             renderDist);
@@ -1238,7 +1278,7 @@ public class MetalWorldRenderer {
             int closeRangeRescanInterval = queuePressure
                     ? ACTIVE_CLOSE_RANGE_RESCAN_INTERVAL
                     : IDLE_CLOSE_RANGE_RESCAN_INTERVAL;
-            if (!playerMovedChunk &&
+            if (needScan && !playerMovedChunk &&
                     scanFrameCounter % closeRangeRescanInterval == 0) {
                 scanRingsInRange(world, playerChunkX, playerChunkZ, playerSectionY, 0,
                         closeRange);
@@ -1689,6 +1729,42 @@ public class MetalWorldRenderer {
         return lastDrawnChunkCount;
     }
 
+    public double getLastScanMs() {
+        return lastScanMs;
+    }
+
+    public double getLastLodMs() {
+        return lastLodMs;
+    }
+
+    public double getLastPrepareCullMs() {
+        return lastPrepareCullMs;
+    }
+
+    public double getLastDrawPrepMs() {
+        return lastDrawPrepMs;
+    }
+
+    public double getLastAtlasMs() {
+        return textureManager != null ? textureManager.getLastAtlasMs() : lastAtlasMs;
+    }
+
+    public double getLastLightmapMs() {
+        return textureManager != null ? textureManager.getLastLightmapMs() : lastLightmapMs;
+    }
+
+    public double getLastNativeDrawPrepMs() {
+        return lastNativeDrawPrepMs;
+    }
+
+    public double getLastJavaRenderMs() {
+        return lastJavaRenderMs;
+    }
+
+    public IOSurfaceBlitter getBlitter() {
+        return ioSurfaceBlitter;
+    }
+
     public MetalTextureManager getTextureManager() {
         return textureManager;
     }
@@ -1802,7 +1878,7 @@ public class MetalWorldRenderer {
             int chunkDist = Math.max(Math.abs(dx), Math.abs(dz));
             int targetLod = CustomChunkMesher.lodTierForDistance(chunkDist);
             int prefetchLod = CustomChunkMesher.lodTierForDistance(Math.max(0, chunkDist - 1));
-            if (prefetchLod < targetLod && mesh.lodTier > prefetchLod) {
+            if (prefetchLod < targetLod) {
                 targetLod = prefetchLod;
             }
             if (mesh.lodTier == targetLod) {
@@ -1839,7 +1915,8 @@ public class MetalWorldRenderer {
                     lodRingBacklog = true;
                     continue;
                 }
-                upgrades.add(new LodCandidate(key, impactNear + 1.0e6f, mesh.chunkX, mesh.chunkY, mesh.chunkZ, targetLod));
+                upgrades.add(
+                        new LodCandidate(key, impactNear + 1.0e6f, mesh.chunkX, mesh.chunkY, mesh.chunkZ, targetLod));
                 try {
                     lodPolicy.observeAndDecide(key, mesh.lodTier, targetLod, true, 1.0f, demotionIdle);
                 } catch (Exception ignored) {
@@ -2075,7 +2152,7 @@ public class MetalWorldRenderer {
             int chunkDist = Math.max(Math.abs(dx), Math.abs(dz));
             int targetLod = CustomChunkMesher.lodTierForDistance(chunkDist);
             int prefetchTier = CustomChunkMesher.lodTierForDistance(Math.max(0, chunkDist - 1));
-            if (prefetchTier < targetLod && mesh.lodTier > prefetchTier) {
+            if (prefetchTier < targetLod) {
                 targetLod = prefetchTier;
             }
             if (mesh.lodTier == targetLod) {
@@ -2109,7 +2186,8 @@ public class MetalWorldRenderer {
                     impactNear = -distSq;
                 }
                 if (upgrades.size() < MAX_LOD_REFRESH_SUBMITS_PER_PASS * 2) {
-                    upgrades.add(new LodCandidate(key, impactNear + 1.0e6f, mesh.chunkX, mesh.chunkY, mesh.chunkZ, targetLod));
+                    upgrades.add(new LodCandidate(key, impactNear + 1.0e6f, mesh.chunkX, mesh.chunkY, mesh.chunkZ,
+                            targetLod));
                 }
                 try {
                     lodPolicy.observeAndDecide(key, mesh.lodTier, targetLod, true, 1.0f, demotionIdle);
