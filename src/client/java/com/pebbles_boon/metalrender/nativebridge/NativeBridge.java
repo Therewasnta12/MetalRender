@@ -63,6 +63,16 @@ public final class NativeBridge {
 
     public static native boolean nSupportsMeshShaders();
 
+    public static native boolean nSupportsIndirectMesh();
+
+    public static native int nGetPerfCoreCount();
+
+    public static native void nSetThreadQos(int cls);
+
+    public static native void nSetOldFrustumFailsafe(boolean enabled);
+
+    public static native void nSetVisibleSections(long[] keys, int count);
+
     public static native long nCreateBufferWithHint(long deviceHandle, int sizeBytes,
             int storageMode, long oldHandle);
 
@@ -112,6 +122,8 @@ public final class NativeBridge {
 
     public static native void nUpdateTexture2D(long textureHandle, int width,
             int height, byte[] pixelData);
+
+    public static native void nUpdateTextureRects(long texture, int count, int[] rects, java.nio.ByteBuffer data);
 
     public static native void nUpdateTexture2DRegion(long textureHandle,
             int srcWidth, int x, int y, int w, int h, byte[] pixelData);
@@ -203,6 +215,8 @@ public final class NativeBridge {
 
     public static native int nGetPassGpuMs(float[] out);
 
+    public static native int nGetCullFailsafeFrames();
+
     public static native int nGetMegaStats(long[] out);
 
     public static native int nGetQuadStats(long[] out);
@@ -253,5 +267,11 @@ public final class NativeBridge {
             boolean enableProgrammableBlending);
 
     public static native void nDrawOITPass(long frameContext);
+
+    public static native int nTerrainExternalDraw(long encoder, long indexBuffer, int width, int height);
+
+    public static native void nWaterExternalDraw(long encoder, int width, int height);
+
+    public static native void nExternalFrameEnd();
 
 }

@@ -13,11 +13,14 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.chunk.ChunkSectionsToRender;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.state.level.LevelRenderState;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.joml.Vector4f;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Final;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -25,6 +28,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(LevelRenderer.class)
 public class WorldRendererBlitMixin {
+    @Shadow @Final private LevelRenderState levelRenderState;
     @Unique
     private final Matrix4f metalrender$projection = new Matrix4f();
     @Unique
@@ -47,7 +51,8 @@ public class WorldRendererBlitMixin {
             CallbackInfo ci) {
         metalrender$frameActive = false;
         metalrender$activeRenderer = null;
-        if (!MetalRenderClient.isEnabled()) {
+        if ((MetalRenderClient.isBackendMode() && !MetalWorldRenderer.legacyTerrainEnabled())
+                || !MetalRenderClient.isEnabled()) {
             return;
         }
         MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
@@ -104,7 +109,8 @@ public class WorldRendererBlitMixin {
         }
     }
 
-    @Inject(method = "renderLevel", at = @At("TAIL"), require = 0)
+    @Inject(method = "renderLevel", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/state/level/LevelRenderState;reset()V"), require = 1)
     private void metalrender$endWorldFrame(
             GraphicsResourceAllocator allocator, DeltaTracker tickCounter,
             boolean renderBlockOutline, CameraRenderState cameraRenderState,
@@ -125,7 +131,11 @@ public class WorldRendererBlitMixin {
         }
         try {
             com.pebbles_boon.metalrender.performance.MetalRenderProfiler.getInstance().endRender();
-            worldRenderer.endFrame();
+            if (MetalRenderClient.isBackendMode()) {
+                worldRenderer.endFrameExternal();
+            } else {
+                worldRenderer.endFrame(levelRenderState.blockBreakingRenderStates);
+            }
             metalrender$endFrameCount++;
             if (metalrender$endFrameCount <= 3) {
                 MetalLogger.info("[blitmix] end hook #%d",

@@ -10,6 +10,9 @@
 #import <OpenGL/gl.h>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <pthread.h>
+#include <sys/sysctl.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <jni.h>
@@ -71,6 +74,7 @@ static inline int dispatch_get_active_cpu_count() {
 }
 #endif
 static bool g_available = true;
+static bool g_externalMode = false;
 static float g_camDirX = 0.0f;
 static float g_camDirY = 0.0f;
 static float g_camDirZ = 1.0f;
@@ -153,6 +157,7 @@ static std::unordered_map<uint64_t, MegaAllocInfo> g_megaAllocs;
 
 static uint64_t g_nextMegaHandle = 0x8000000000000000ULL;
 static std::shared_mutex g_megaMutex;
+static std::atomic<uint32_t> g_cullFailsafeFrames{0};
 static float g_passGpuMs[5] = {0, 0, 0, 0, 0};
 static std::atomic<long long> g_megaAllocCount{0};
 static std::atomic<long long> g_megaFreeCount{0};
@@ -609,6 +614,7 @@ static id<MTLRenderPipelineState> g_pipelineEntity = nil;
 static id<MTLRenderPipelineState> g_pipelineEntityInstanced = nil;
 static id<MTLRenderPipelineState> g_pipelineEntityTranslucent = nil;
 static id<MTLRenderPipelineState> g_pipelineEntityEmissive = nil;
+static id<MTLRenderPipelineState> g_pipelineBlockBreaking = nil;
 static id<MTLRenderPipelineState> g_pipelineEntityOutline = nil;
 static id<MTLRenderPipelineState> g_pipelineEntityShadow = nil;
 static id<MTLRenderPipelineState> g_pipelineParticle = nil;
@@ -640,7 +646,7 @@ static float g_previousViewProjection[16] = {};
 #endif
 #ifdef METALRENDER_HAS_METALFX
 static inline bool mfxActive() {
-  return g_mfxSpatialScaler != nil || g_mfxTemporalScaler != nil;
+  return !g_externalMode && (g_mfxSpatialScaler != nil || g_mfxTemporalScaler != nil);
 }
 #else
 static inline bool mfxActive() { return false; }
@@ -725,6 +731,13 @@ static std::unordered_set<int64_t> g_visibleClusterKeys;
 static std::mutex g_clusterVisibilityMutex;
 static std::unordered_set<int64_t> s_clusterSnapshot;
 static bool s_clusterSnapshotActive = false;
+static std::unordered_set<int64_t> g_visibleSectionKeys;
+static std::unordered_set<int64_t> s_sectionSnapshot;
+static bool g_sectionCullingEnabled = false;
+static bool s_sectionSnapshotActive = false;
+static uint64_t g_sectionVisibilityVersion = 0;
+static uint64_t s_sectionVisibilityVersion = 0;
+static int g_sectionMeshGeneration = -1;
 
 static inline void hizUpdateThreadgroupSize(id<MTLTexture> srcDepth) {
   int w = (int)srcDepth.width;
@@ -1027,6 +1040,7 @@ static int g_activeMeshCount = 0;
 static std::atomic<int> g_meshRegGeneration{0};
 static std::atomic<int> g_meshRemovalGeneration{0};
 static bool g_cpuFrustumCullEnabled = true;
+static bool g_oldFrustumFailsafe = false;
 static int64_t packMeshKey(int cx, int cy, int cz) {
   return ((int64_t)(cx & 0x3FFFFF) << 42) | ((int64_t)(cy & 0xFFFFF) << 22) |
          (int64_t)(cz & 0x3FFFFF);
@@ -1203,11 +1217,32 @@ static void ensure_device() {
   }
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_backend_metal_MetalNative_nBackendAttach(
+    JNIEnv *, jclass, jlong deviceHandle, jlong queueHandle) {
+  id<MTLDevice> device = (id<MTLDevice>)(uintptr_t)deviceHandle;
+  id<MTLCommandQueue> queue = (id<MTLCommandQueue>)(uintptr_t)queueHandle;
+  if (!device || !queue)
+    return;
+  if (g_device != device) {
+    [device retain];
+    [g_device release];
+    g_device = device;
+  }
+  if (g_queue != queue) {
+    [queue retain];
+    [g_queue release];
+    g_queue = queue;
+  }
+  (void)megaPageSizeForSystem();
+}
+
 struct MetalFeatureCaps {
   bool argumentBuffers;
   bool indirectCommandBuffers;
   bool memorylessTargets;
   bool meshShaders;
+  bool indirectMesh;
 };
 
 static bool metal_supports_family(id<MTLDevice> device, MTLGPUFamily family) {
@@ -1234,6 +1269,7 @@ static MetalFeatureCaps current_feature_caps() {
   caps.indirectCommandBuffers = apple3 || mac2;
   caps.memorylessTargets = apple2;
   caps.meshShaders = apple7 || mac2;
+  if (@available(macOS 14.0, *)) caps.indirectMesh = [g_device supportsFamily:MTLGPUFamilyApple9];
 
   if (!@available(macOS 13.0, *)) {
     caps.meshShaders = false;
@@ -1245,13 +1281,60 @@ static MetalFeatureCaps current_feature_caps() {
 static id<MTLBinaryArchive> g_pipelineArchive = nil;
 static NSString *g_archivePath = nil;
 
+static std::unordered_map<void *, id<MTLRenderPipelineState>> g_rgbaTwins;
+
+static id<MTLRenderPipelineState> mr_ext_pso(id<MTLRenderPipelineState> pso) {
+  if (!g_externalMode || !pso)
+    return pso;
+  auto it = g_rgbaTwins.find((__bridge void *)pso);
+  return it != g_rgbaTwins.end() ? it->second : pso;
+}
+
+static MTLWinding mr_ext_winding() {
+  return g_externalMode ? MTLWindingClockwise : MTLWindingCounterClockwise;
+}
+
+static void mr_store_twin(id<MTLRenderPipelineState> pso, id<MTLRenderPipelineState> twin) {
+  if (pso && twin)
+    g_rgbaTwins[(__bridge void *)pso] = twin;
+}
+
+static id<MTLRenderPipelineState> mr_mesh_pipeline(MTLMeshRenderPipelineDescriptor *desc, NSError **outErr) {
+  id<MTLRenderPipelineState> pso = [g_device newRenderPipelineStateWithMeshDescriptor:desc
+                                                                              options:MTLPipelineOptionNone
+                                                                           reflection:nil
+                                                                                error:outErr];
+  if (pso && desc.colorAttachments[0].pixelFormat == MTLPixelFormatBGRA8Unorm) {
+    MTLMeshRenderPipelineDescriptor *twinDesc = [desc copy];
+    twinDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *twinErr = nil;
+    mr_store_twin(pso, [g_device newRenderPipelineStateWithMeshDescriptor:twinDesc
+                                                                  options:MTLPipelineOptionNone
+                                                               reflection:nil
+                                                                    error:&twinErr]);
+    [twinDesc release];
+  }
+  return pso;
+}
+
 static id<MTLRenderPipelineState>
 makePipeline(MTLRenderPipelineDescriptor *desc, NSError **outErr) {
   if (@available(macOS 11.0, *)) {
     if (g_pipelineArchive)
       desc.binaryArchives = @[ g_pipelineArchive ];
   }
-  return [g_device newRenderPipelineStateWithDescriptor:desc error:outErr];
+  id<MTLRenderPipelineState> pso = [g_device newRenderPipelineStateWithDescriptor:desc error:outErr];
+  if (pso && desc.colorAttachments[0].pixelFormat == MTLPixelFormatBGRA8Unorm) {
+    MTLRenderPipelineDescriptor *twinDesc = [desc copy];
+    twinDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    if (@available(macOS 11.0, *)) {
+      twinDesc.binaryArchives = nil;
+    }
+    NSError *twinErr = nil;
+    mr_store_twin(pso, [g_device newRenderPipelineStateWithDescriptor:twinDesc error:&twinErr]);
+    [twinDesc release];
+  }
+  return pso;
 }
 
 static id<MTLComputePipelineState> makeComputePipeline(id<MTLFunction> func,
@@ -1829,10 +1912,7 @@ kernel void mfx_preserve_alpha(
         meshDesc.rasterizationEnabled = YES;
         NSError *meshErr = nil;
         g_pipelineMeshOpaque =
-            [g_device newRenderPipelineStateWithMeshDescriptor:meshDesc
-                                                       options:MTLPipelineOptionNone
-                                                    reflection:nil
-                                                         error:&meshErr];
+            mr_mesh_pipeline(meshDesc, &meshErr);
         if (g_pipelineMeshOpaque) {
           g_meshPipelineCount++;
           dbg("Mesh opaque terrain pipeline created OK\n");
@@ -1855,10 +1935,7 @@ kernel void mfx_preserve_alpha(
           cutoutDesc.rasterizationEnabled = YES;
           NSError *cutoutErr = nil;
           g_pipelineMeshCutout =
-              [g_device newRenderPipelineStateWithMeshDescriptor:cutoutDesc
-                                                           options:MTLPipelineOptionNone
-                                                        reflection:nil
-                                                             error:&cutoutErr];
+              mr_mesh_pipeline(cutoutDesc, &cutoutErr);
           if (g_pipelineMeshCutout) {
             g_meshPipelineCount++;
             dbg("Mesh cutout terrain pipeline created OK\n");
@@ -1881,10 +1958,7 @@ kernel void mfx_preserve_alpha(
           emissiveDesc.rasterizationEnabled = YES;
           NSError *emErr = nil;
           g_pipelineMeshEmissive =
-              [g_device newRenderPipelineStateWithMeshDescriptor:emissiveDesc
-                                                         options:MTLPipelineOptionNone
-                                                      reflection:nil
-                                                           error:&emErr];
+              mr_mesh_pipeline(emissiveDesc, &emErr);
           if (g_pipelineMeshEmissive) {
             g_meshPipelineCount++;
             dbg("Mesh emissive terrain pipeline created OK\n");
@@ -1901,7 +1975,7 @@ kernel void mfx_preserve_alpha(
 
   auto createEntityPipeline = [&](NSString *vertName, NSString *fragName,
                                   NSString *label,
-                                  bool blending) -> id<MTLRenderPipelineState> {
+                                  bool blending, bool breaking = false) -> id<MTLRenderPipelineState> {
     id<MTLFunction> vf = [g_shaderLibrary newFunctionWithName:vertName];
     id<MTLFunction> ff = [g_shaderLibrary newFunctionWithName:fragName];
     if (!vf || !ff) {
@@ -1926,6 +2000,12 @@ kernel void mfx_preserve_alpha(
       pd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
       pd.colorAttachments[0].destinationAlphaBlendFactor =
           MTLBlendFactorOneMinusSourceAlpha;
+      if (breaking) {
+        pd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorDestinationColor;
+        pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorSourceColor;
+        pd.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorZero;
+        pd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+      }
     } else {
       pd.colorAttachments[0].blendingEnabled = NO;
     }
@@ -1945,6 +2025,8 @@ kernel void mfx_preserve_alpha(
                            @"EntityTranslucent", true);
   g_pipelineEntityEmissive = createEntityPipeline(
       @"vertex_entity", @"fragment_entity_emissive", @"EntityEmissive", true);
+  g_pipelineBlockBreaking = createEntityPipeline(
+      @"vertex_entity", @"fragment_entity_emissive", @"BlockBreaking", true, true);
   g_pipelineEntityInstanced =
       createEntityPipeline(@"vertex_entity_instanced", @"fragment_entity",
                            @"EntityInstanced", false);
@@ -2661,6 +2743,24 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetDeviceName(
     return env->NewStringUTF("unknown");
   NSString *name = [g_device name];
   return env->NewStringUTF([name UTF8String]);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetPerfCoreCount(JNIEnv *, jclass) {
+  int count = -1;
+  size_t size = sizeof(count);
+  return sysctlbyname("hw.perflevel0.physicalcpu", &count, &size, nullptr, 0) == 0 ? count : -1;
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetThreadQos(JNIEnv *, jclass, jint cls) {
+  pthread_set_qos_class_self_np((qos_class_t)cls, 0);
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetOldFrustumFailsafe(JNIEnv *, jclass, jboolean enabled) {
+  g_oldFrustumFailsafe = enabled == JNI_TRUE;
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSupportsIndirectMesh(JNIEnv *, jclass) {
+  return current_feature_caps().indirectMesh ? JNI_TRUE : JNI_FALSE;
 }
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSupportsIndirect(
@@ -3648,6 +3748,11 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
       s_clusterSnapshotActive = g_clusterCullingEnabled;
       if (s_clusterSnapshotActive)
         s_clusterSnapshot = g_visibleClusterKeys;
+      s_sectionSnapshotActive = g_sectionCullingEnabled && g_sectionMeshGeneration == g_meshRegGeneration.load(std::memory_order_acquire);
+      if (s_sectionSnapshotActive && s_sectionVisibilityVersion != g_sectionVisibilityVersion) {
+        s_sectionSnapshot = g_visibleSectionKeys;
+        s_sectionVisibilityVersion = g_sectionVisibilityVersion;
+      }
     }
     g_deferredWaterCmdCount = 0;
     g_deferredWaterIB = nil;
@@ -3655,7 +3760,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
     g_deferredWaterOffsetBuf = nil;
     g_oitCmdsCount = 0;
     if (!g_currentPipeline && g_pipelineInhouse) {
-      [g_currentEncoder setRenderPipelineState:g_pipelineInhouse];
+      [g_currentEncoder setRenderPipelineState:mr_ext_pso(g_pipelineInhouse)];
       g_currentPipeline = g_pipelineInhouse;
       if (g_depthState)
         [g_currentEncoder setDepthStencilState:g_depthState];
@@ -3812,7 +3917,8 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
     for (int si = 0; si < totalActive; si++) {
       const MeshSnapshot &ms = s_snapshots[si];
       if (!isClusterVisible(ms.chunkX, ms.chunkZ) ||
-          !isGpuCullVisible(ms.bufferHandle))
+          !isGpuCullVisible(ms.bufferHandle) ||
+          (s_sectionSnapshotActive && s_sectionSnapshot.count(packMeshKey(ms.chunkX, ms.chunkY, ms.chunkZ)) == 0))
         continue;
       float ox = (float)((double)ms.chunkX * 16.0 - g_camX);
       float oy = (float)((double)ms.chunkY * 16.0 - g_camY);
@@ -3857,7 +3963,16 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
         s_cullKeep[si] = vis;
         kept += vis;
       }
-      if (kept == 0 || (validCount >= 96 && kept * 24 < validCount)) {
+      bool oldFallback = kept == 0 || (validCount >= 96 && kept * 24 < validCount);
+      if (oldFallback) g_cullFailsafeFrames.fetch_add(1, std::memory_order_relaxed);
+      bool planesValid = true;
+      for (int i = 0; i < 24; i++) if (!std::isfinite(frustumPlanes[i])) planesValid = false;
+      for (int i = 0; i < 6; i++) {
+        const float *p = frustumPlanes + i * 4;
+        float length = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        if (!(length > 0.5f && length < 1.5f)) planesValid = false;
+      }
+      if (g_oldFrustumFailsafe ? oldFallback : !planesValid) {
         if (g_frameCount < 5 || (g_frameCount % 600 == 0)) {
           dbg("CULL_FAILSAFE: kept=%d input=%d, fallback distance-only\n", kept,
               validCount);
@@ -4188,7 +4303,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
             if (sliceCount <= 0)
               continue;
             id<MTLBuffer> pageBuf = pageBufs[p];
-            [g_currentEncoder setRenderPipelineState:g_pipelineMeshOpaque];
+            [g_currentEncoder setRenderPipelineState:mr_ext_pso(g_pipelineMeshOpaque)];
             g_currentPipeline = g_pipelineMeshOpaque;
             if (g_depthState)
               [g_currentEncoder setDepthStencilState:g_depthState];
@@ -4257,14 +4372,14 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
                                                      ? g_pipelineInhouseOpaque
                                                      : g_pipelineInhouse;
             if (opaqueP) {
-              [g_currentEncoder setRenderPipelineState:opaqueP];
+              [g_currentEncoder setRenderPipelineState:mr_ext_pso(opaqueP)];
               g_currentPipeline = opaqueP;
               if (g_blockAtlas)
                 [g_currentEncoder setFragmentTexture:g_blockAtlas atIndex:0];
               if (g_depthState)
                 [g_currentEncoder setDepthStencilState:g_depthState];
               [g_currentEncoder
-                  setFrontFacingWinding:MTLWindingCounterClockwise];
+                  setFrontFacingWinding:mr_ext_winding()];
               [g_currentEncoder setCullMode:MTLCullModeBack];
               [g_currentEncoder setVertexBytes:g_projMatrix
                                         length:64
@@ -4406,11 +4521,17 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
       offBuf[i * 4 + 3] = maskAsFloat;
     }
     [g_currentEncoder setVertexBuffer:offsetBuf offset:0 atIndex:4];
+    {
+      float camPosVtx[4] = {0.0f, 0.0f, 0.0f, g_skyBrightness};
+      [g_currentEncoder setVertexBytes:g_projMatrix length:64 atIndex:1];
+      [g_currentEncoder setVertexBytes:g_mvMatrix length:64 atIndex:2];
+      [g_currentEncoder setVertexBytes:camPosVtx length:16 atIndex:3];
+    }
 
     if (g_depthState) {
       [g_currentEncoder setDepthStencilState:g_depthState];
     }
-    [g_currentEncoder setFrontFacingWinding:MTLWindingCounterClockwise];
+    [g_currentEncoder setFrontFacingWinding:mr_ext_winding()];
     [g_currentEncoder setCullMode:MTLCullModeBack];
 
     [g_currentEncoder setFragmentBytes:g_entityOverlayParams
@@ -4490,14 +4611,14 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
                                                     s_cmds[i].facingMask);
     }
     bool canICB =
-        (g_icbCapable && icbCandidateCount > 0 && g_pipelineInhouseICB &&
+        (false && g_icbCapable && icbCandidateCount > 0 && g_pipelineInhouseICB &&
          g_fragArgBuf && g_fragArgEncoder && g_blockAtlas && g_lightmap);
     bool useOpaqueICB = canICB && g_pipelineInhouseICBOpaque &&
                         g_fragArgBufOpaque && g_fragArgEncoderOpaque;
     bool useOpaque = g_pipelineInhouseOpaque != nil;
     if (canICB) {
       if (useOpaqueICB) {
-        [g_currentEncoder setRenderPipelineState:g_pipelineInhouseICBOpaque];
+        [g_currentEncoder setRenderPipelineState:mr_ext_pso(g_pipelineInhouseICBOpaque)];
         g_currentPipeline = g_pipelineInhouseICBOpaque;
         [g_fragArgEncoderOpaque setArgumentBuffer:g_fragArgBufOpaque offset:0];
         [g_fragArgEncoderOpaque setTexture:g_blockAtlas atIndex:0];
@@ -4507,7 +4628,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
                                      offset:0
                                     atIndex:0];
       } else {
-        [g_currentEncoder setRenderPipelineState:g_pipelineInhouseICB];
+        [g_currentEncoder setRenderPipelineState:mr_ext_pso(g_pipelineInhouseICB)];
         g_currentPipeline = g_pipelineInhouseICB;
         [g_fragArgEncoder setArgumentBuffer:g_fragArgBuf offset:0];
         [g_fragArgEncoder setTexture:g_blockAtlas atIndex:0];
@@ -4590,10 +4711,10 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
                         withRange:NSMakeRange(0, (NSUInteger)icbIdx)];
       g_drawCallCount++;
       if (useOpaque) {
-        [g_currentEncoder setRenderPipelineState:g_pipelineInhouseOpaque];
+        [g_currentEncoder setRenderPipelineState:mr_ext_pso(g_pipelineInhouseOpaque)];
         g_currentPipeline = g_pipelineInhouseOpaque;
       } else {
-        [g_currentEncoder setRenderPipelineState:g_pipelineInhouse];
+        [g_currentEncoder setRenderPipelineState:mr_ext_pso(g_pipelineInhouse)];
         g_currentPipeline = g_pipelineInhouse;
       }
       if (g_blockAtlas) {
@@ -4601,7 +4722,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChun
       }
     } else {
       if (useOpaque) {
-        [g_currentEncoder setRenderPipelineState:g_pipelineInhouseOpaque];
+        [g_currentEncoder setRenderPipelineState:mr_ext_pso(g_pipelineInhouseOpaque)];
         g_currentPipeline = g_pipelineInhouseOpaque;
         if (g_blockAtlas) {
           [g_currentEncoder setFragmentTexture:g_blockAtlas atIndex:0];
@@ -5041,6 +5162,40 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetCurrentFrameCon
   }
   return (jlong)0x1;
 }
+static void mr_process_deferred_deletions() {
+  std::lock_guard<std::mutex> lock(g_deferredMutex);
+
+  int freed = 0;
+  const size_t kMaxDeletionsPerFrame = 512;
+  size_t i = 0;
+  while (i < g_deferredDeletions.size() &&
+         (size_t)freed < kMaxDeletionsPerFrame) {
+    auto &dd = g_deferredDeletions[i];
+    if (g_frameCount - dd.frameQueued >= DEFERRED_FRAME_DELAY) {
+      if (dd.isMega) {
+        megaFree(dd.handle);
+      } else {
+        std::unique_lock<std::shared_mutex> bufLock(g_bufferMutex);
+        auto bufIt = g_buffers.find(dd.handle);
+        if (bufIt != g_buffers.end()) {
+          [bufIt->second release];
+          g_buffers.erase(bufIt);
+        }
+      }
+
+      dd = g_deferredDeletions.back();
+      g_deferredDeletions.pop_back();
+      freed++;
+    } else {
+      i++;
+    }
+  }
+  if (freed > 0 && (g_frameCount % 300 == 0)) {
+    dbg("DeferredDelete: freed %d buffers (%zu pending)\n", freed,
+        g_deferredDeletions.size());
+  }
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nEndFrame(
     JNIEnv *, jclass, jlong handle) {
@@ -5302,39 +5457,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nEndFrame(
         g_thermalQualityLevel = 0;
       }
     }
-    {
-      std::lock_guard<std::mutex> lock(g_deferredMutex);
-
-      int freed = 0;
-      const size_t kMaxDeletionsPerFrame = 512;
-      size_t i = 0;
-      while (i < g_deferredDeletions.size() &&
-             (size_t)freed < kMaxDeletionsPerFrame) {
-        auto &dd = g_deferredDeletions[i];
-        if (g_frameCount - dd.frameQueued >= DEFERRED_FRAME_DELAY) {
-          if (dd.isMega) {
-            megaFree(dd.handle);
-          } else {
-            std::unique_lock<std::shared_mutex> bufLock(g_bufferMutex);
-            auto bufIt = g_buffers.find(dd.handle);
-            if (bufIt != g_buffers.end()) {
-              [bufIt->second release];
-              g_buffers.erase(bufIt);
-            }
-          }
-
-          dd = g_deferredDeletions.back();
-          g_deferredDeletions.pop_back();
-          freed++;
-        } else {
-          i++;
-        }
-      }
-      if (freed > 0 && (g_frameCount % 300 == 0)) {
-        dbg("DeferredDelete: freed %d buffers (%zu pending)\n", freed,
-            g_deferredDeletions.size());
-      }
-    }
+    mr_process_deferred_deletions();
     g_prof_endFrame_acc += (mach_absolute_time() - _prof_ef_t0);
     g_prof_count++;
 
@@ -5589,6 +5712,67 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nUpdateTexture2DReg
   }
   env->ReleaseByteArrayElements(pixelData, data, JNI_ABORT);
 }
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nUpdateTextureRects(
+    JNIEnv *env, jclass, jlong textureHandle, jint count, jintArray rectangles,
+    jobject data) {
+  if (!textureHandle || count <= 0) return;
+  auto invalid = [&]() {
+    env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),
+                  "Invalid atlas rectangle upload");
+  };
+  if (!rectangles || !data || count > env->GetArrayLength(rectangles) / 4) {
+    invalid();
+    return;
+  }
+  auto *bytes = static_cast<uint8_t *>(env->GetDirectBufferAddress(data));
+  jlong capacity = env->GetDirectBufferCapacity(data);
+  if (!bytes || capacity < 0) {
+    invalid();
+    return;
+  }
+  id<MTLTexture> tex = (__bridge id<MTLTexture>)(void *)(uintptr_t)textureHandle;
+  jint *rects = env->GetIntArrayElements(rectangles, nullptr);
+  if (!rects) return;
+  uint64_t size = 0;
+  bool valid = true;
+  for (int i = 0; i < count; i++) {
+    const jint *r = rects + i * 4;
+    if (r[0] < 0 || r[1] < 0 || r[2] <= 0 || r[3] <= 0 ||
+        (uint64_t)r[0] + r[2] > [tex width] ||
+        (uint64_t)r[1] + r[3] > [tex height]) {
+      valid = false;
+      break;
+    }
+    uint64_t length = (uint64_t)r[2] * r[3] * 4;
+    if (length > (uint64_t)capacity - size) {
+      valid = false;
+      break;
+    }
+    size += length;
+  }
+  if (!valid) {
+    env->ReleaseIntArrayElements(rectangles, rects, JNI_ABORT);
+    invalid();
+    return;
+  }
+  size_t offset = 0;
+  for (int i = 0; i < count; i++) {
+    const jint *r = rects + i * 4;
+    [tex replaceRegion:MTLRegionMake2D(r[0], r[1], r[2], r[3])
+           mipmapLevel:0 withBytes:bytes + offset bytesPerRow:(NSUInteger)r[2] * 4];
+    offset += (size_t)r[2] * r[3] * 4;
+  }
+  env->ReleaseIntArrayElements(rectangles, rects, JNI_ABORT);
+  if ([tex mipmapLevelCount] > 1 && g_queue) {
+    id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit generateMipmapsForTexture:tex];
+    [blit endEncoding];
+    [cb commit];
+  }
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetDeviceHandle(
     JNIEnv *, jclass, jlong handle) {
@@ -5836,7 +6020,11 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawEntityBuffer(
     id<MTLRenderPipelineState> pipeline = g_pipelineEntity;
     id<MTLDepthStencilState> depthSt =
         g_depthState ? g_depthState : g_depthStateNoWrite;
-    if (renderFlags & 0x2) {
+    if (renderFlags & 0x10) {
+      if (!g_pipelineBlockBreaking) return;
+      pipeline = g_pipelineBlockBreaking;
+      depthSt = g_depthStateNoWrite;
+    } else if (renderFlags & 0x2) {
       pipeline = g_pipelineEntityEmissive ? g_pipelineEntityEmissive
                                           : g_pipelineEntity;
     } else if (renderFlags & 0x1) {
@@ -5872,9 +6060,15 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawEntityBuffer(
                                atIndex:1];
 
   [g_currentEncoder setCullMode:MTLCullModeNone];
+  if (renderFlags & 0x10) {
+    [g_currentEncoder setDepthBias:-1.0f slopeScale:-1.0f clamp:0.0f];
+  }
   [g_currentEncoder drawPrimitives:MTLPrimitiveTypeTriangle
                        vertexStart:(NSUInteger)baseVertex
                        vertexCount:(NSUInteger)vertexCount];
+  if (renderFlags & 0x10) {
+    [g_currentEncoder setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+  }
   g_drawCallCount++;
 }
 extern "C" JNIEXPORT void JNICALL
@@ -6039,6 +6233,22 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetTranslucencySortEnabled(
     JNIEnv *, jclass, jboolean enabled) {
   g_translucencySortEnabled = enabled == JNI_TRUE;
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetVisibleSections(
+    JNIEnv *env, jclass, jlongArray keys, jint count) {
+  std::lock_guard<std::mutex> lock(g_clusterVisibilityMutex);
+  g_sectionCullingEnabled = false;
+  g_visibleSectionKeys.clear();
+  g_sectionVisibilityVersion++;
+  if (!keys || count <= 0) return;
+  jint length = std::min(count, (jint)env->GetArrayLength(keys));
+  jlong *values = env->GetLongArrayElements(keys, nullptr);
+  if (!values) return;
+  for (int i = 0; i < length; i++) g_visibleSectionKeys.insert((int64_t)values[i]);
+  env->ReleaseLongArrayElements(keys, values, JNI_ABORT);
+  g_sectionMeshGeneration = g_meshRegGeneration.load(std::memory_order_acquire);
+  g_sectionCullingEnabled = length > 0;
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nUploadClusterVisibilityKeys(
@@ -6373,7 +6583,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawDeferredWaterP
 
     id<MTLRenderPipelineState> waterPipeline =
         g_pipelineWater ? g_pipelineWater : g_pipelineInhouse;
-    [g_currentEncoder setRenderPipelineState:waterPipeline];
+    [g_currentEncoder setRenderPipelineState:mr_ext_pso(waterPipeline)];
     g_currentPipeline = waterPipeline;
     if (g_blockAtlas)
       [g_currentEncoder setFragmentTexture:g_blockAtlas atIndex:0];
@@ -6926,13 +7136,19 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetNativeDrawPrepM
 }
 
 extern "C" JNIEXPORT jint JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetCullFailsafeFrames(
+    JNIEnv *, jclass) {
+  return (jint)g_cullFailsafeFrames.load(std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT jint JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetPassGpuMs(
     JNIEnv *env, jclass, jfloatArray out) {
   if (!out) return 0;
   jsize len = env->GetArrayLength(out);
   jsize n = len < 5 ? len : 5;
   float tmp[5];
-  for (int i = 0; i < 5; i++) tmp[i] = g_passGpuMs[i];
+  for (int i = 0; i < 5; i++) tmp[i] = -1.0f;
   env->SetFloatArrayRegion(out, 0, n, tmp);
   return (jint)n;
 }
@@ -7146,4 +7362,82 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDestroyIndirectCom
   if (cit != g_javaICBEncodedCount.end()) {
     g_javaICBEncodedCount.erase(cit);
   }
+}
+
+static void mr_apply_external_state(id<MTLRenderCommandEncoder> enc, int width, int height) {
+  g_externalMode = true;
+  g_useProgrammableBlending = false;
+  if (g_currentEncoder != enc) {
+    [g_currentEncoder release];
+    g_currentEncoder = [enc retain];
+  }
+  g_currentPipeline = nil;
+  MTLViewport vp = {0.0, 0.0, (double)width, (double)height, 0.0, 1.0};
+  [enc setViewport:vp];
+  [enc setVertexBytes:g_projMatrix length:64 atIndex:1];
+  [enc setVertexBytes:g_mvMatrix length:64 atIndex:2];
+  float camPos[4] = {(float)g_camX, (float)g_camY, (float)g_camZ, g_skyBrightness};
+  [enc setVertexBytes:camPos length:16 atIndex:3];
+  float chunkOff[4] = {0, 0, 0, 0};
+  [enc setVertexBytes:chunkOff length:16 atIndex:4];
+  [enc setFrontFacingWinding:MTLWindingClockwise];
+  [enc setCullMode:MTLCullModeBack];
+  [enc setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+  if (g_depthState)
+    [enc setDepthStencilState:g_depthState];
+  if (g_blockAtlas)
+    [enc setFragmentTexture:g_blockAtlas atIndex:0];
+  id<MTLTexture> lightmap = g_lightmap ? g_lightmap : g_lightmapFallback;
+  if (lightmap)
+    [enc setFragmentTexture:lightmap atIndex:1];
+}
+
+static void mr_release_external_encoder() {
+  [g_currentEncoder release];
+  g_currentEncoder = nil;
+  g_currentPipeline = nil;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nTerrainExternalDraw(
+    JNIEnv *env, jclass cls, jlong encoder, jlong indexBuffer, jint width, jint height) {
+  id<MTLRenderCommandEncoder> enc = (id<MTLRenderCommandEncoder>)(uintptr_t)encoder;
+  if (!enc || !g_pipelineInhouse)
+    return 0;
+  @autoreleasepool {
+    mr_apply_external_state(enc, width, height);
+    jint drawn = Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChunks(
+        env, cls, 1, indexBuffer);
+    mr_release_external_encoder();
+    return drawn;
+  }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nWaterExternalDraw(
+    JNIEnv *env, jclass cls, jlong encoder, jint width, jint height) {
+  id<MTLRenderCommandEncoder> enc = (id<MTLRenderCommandEncoder>)(uintptr_t)encoder;
+  if (!enc)
+    return;
+  @autoreleasepool {
+    mr_apply_external_state(enc, width, height);
+    Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawDeferredWaterPass(env, cls, 1);
+    mr_release_external_encoder();
+  }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nExternalFrameEnd(JNIEnv *, jclass) {
+  g_externalMode = true;
+  g_frameCount++;
+  g_currentBufferIndex = (g_currentBufferIndex + 1) % kTripleBufferCount;
+  g_renderSlot = g_currentBufferIndex;
+  g_drawCallCount = 0;
+  g_drawSkipCount = 0;
+  g_currentPipeline = nil;
+  g_deferredWaterCmdCount = 0;
+  g_deferredWaterIB = nil;
+  g_deferredWaterIBOffset = 0;
+  g_deferredWaterOffsetBuf = nil;
+  mr_process_deferred_deletions();
 }
