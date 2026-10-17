@@ -28,6 +28,8 @@ final class MetalSurface {
         if (layer == 0) {
             throw new IllegalStateException("CAMetalLayer creation failed: " + MetalNative.nLastError());
         }
+        MetalNative.nSetPacedPresent(
+                com.pebbles_boon.metalrender.config.MetalRenderConfig.getBool("metalrender.pacedPresent", true));
     }
 
     long layer() {

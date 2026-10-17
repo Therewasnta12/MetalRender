@@ -39,7 +39,7 @@ echo "Using JAVA_HOME: $JAVA_HOME"
 
 clang++ -O3 -std=c++17 -dynamiclib \
     -DMETALRENDER_HAS_METALFX=1 \
-    -framework Metal -framework MetalFX -framework Foundation -framework Cocoa -framework IOKit -framework IOSurface -framework OpenGL -framework QuartzCore \
+    -framework Metal -framework MetalFX -framework Foundation -framework Cocoa -framework IOKit -framework IOSurface -framework OpenGL -framework QuartzCore -framework CoreVideo \
     -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/darwin" \
     -I"src/main/resources/native" \
     src/main/resources/native/metalrender.mm \
