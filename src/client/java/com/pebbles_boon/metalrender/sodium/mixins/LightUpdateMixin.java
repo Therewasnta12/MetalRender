@@ -18,7 +18,7 @@ public class LightUpdateMixin {
     private void metalrender$onLightData(LightLayer layer, SectionPos pos,
             DataLayer data, CallbackInfo ci) {
         try {
-            if (pos == null) {
+            if (pos == null || !MetalWorldRenderer.legacyTerrainEnabled()) {
                 return;
             }
             MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
