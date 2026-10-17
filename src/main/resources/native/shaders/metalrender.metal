@@ -300,7 +300,21 @@ struct TerrainVOut {
     half4  color;
     half2  lightUV;
     float2 fogSphCyl;
+    float2 tile;
+    float4 tileRect [[flat]];
 };
+
+inline half4 sample_terrain_atlas(texture2d<half> atlas, sampler smp, TerrainVOut in) {
+    float2 gx = dfdx(in.texCoord);
+    float2 gy = dfdy(in.texCoord);
+    float2 uv = in.texCoord;
+    if (in.tileRect.z != 0.0f || in.tileRect.w != 0.0f) {
+        uv = in.tileRect.xy + fract(in.tile * 0.99999f) * in.tileRect.zw;
+        gx = dfdx(in.tile) * in.tileRect.zw;
+        gy = dfdy(in.tile) * in.tileRect.zw;
+    }
+    return atlas.sample(smp, uv, gradient2d(gx, gy));
+}
 
 vertex TerrainVOut terrain_vs(
     uint vid [[vertex_id]],
@@ -320,6 +334,8 @@ vertex TerrainVOut terrain_vs(
     out.color    = half4(0.0h);
     out.lightUV  = half2(0.0h);
     out.fogSphCyl = float2(0.0f);
+    out.tile = float2(0.0f);
+    out.tileRect = float4(0.0f);
     uint quad = vid >> 2;
     uint corner = vid & 3u;
     uint2 entry = list[iid];
@@ -335,6 +351,8 @@ vertex TerrainVOut terrain_vs(
     float3 worldPos = c.pos + rel;
     out.position = projectionMatrix * (modelViewMatrix * float4(worldPos, 1.0));
     out.texCoord = c.uv;
+    out.tile     = c.tile;
+    out.tileRect = c.tileRect;
     out.color    = half4(half3(c.rgb), half(c.alpha));
     out.lightUV  = half2(kLightmapLut[c.light & 0xFFu]);
     out.fogSphCyl = float2(length(worldPos), max(length(worldPos.xz), abs(worldPos.y)));
@@ -351,7 +369,7 @@ fragment half4 fragment_arena_solid(
                                    mip_filter::nearest, address::clamp_to_edge);
     constexpr sampler atlasSampler(mag_filter::nearest, min_filter::linear,
                                    mip_filter::linear);
-    half3 rgb = blockAtlas.sample(atlasSampler, in.texCoord).rgb * in.color.rgb;
+    half3 rgb = sample_terrain_atlas(blockAtlas, atlasSampler, in).rgb * in.color.rgb;
     half3 light = lightmap.sample(lightSampler, float2(in.lightUV)).rgb;
     rgb *= max(light, half3(0.04h));
     rgb = vanilla_apply_fog(rgb, in.fogSphCyl, fog);
@@ -368,7 +386,7 @@ fragment half4 fragment_arena_cutout(
                                    mip_filter::nearest, address::clamp_to_edge);
     constexpr sampler atlasSampler(mag_filter::nearest, min_filter::linear,
                                    mip_filter::linear);
-    half4 texColor = blockAtlas.sample(atlasSampler, in.texCoord);
+    half4 texColor = sample_terrain_atlas(blockAtlas, atlasSampler, in);
     half vertAlpha = in.color.a;
     if (texColor.a < half(0.5h)) {
         if (vertAlpha > half(0.994h) && vertAlpha < half(0.998h)) {

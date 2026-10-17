@@ -2928,12 +2928,10 @@ public class CustomChunkMesher {
                 return info;
             }
             try {
-                if (state.isAir() || !state.isSolidRender())
+                if (state.isAir() || (!state.isSolidRender() && !(state.getBlock() instanceof LeavesBlock)))
                     return info;
                 if (state.getRenderShape() != net.minecraft.world.level.block.RenderShape.MODEL)
                     return info;
-                if (state.getBlock() instanceof LeavesBlock) {
-                }
                 BlockStateModel model = getCachedModel(state);
                 if (model == null)
                     return info;
@@ -3207,6 +3205,11 @@ public class CustomChunkMesher {
                         }
                         byte lightByte = computeFaceLightFast(x, y, z, dir, emission);
                         int light = lightByte & 0xFF;
+                        if (lodTier >= 2) {
+                            int bl = (((light & 0xF) + 1) / 3) * 3;
+                            int sl = ((((light >> 4) & 0xF) + 1) / 3) * 3;
+                            light = bl | (sl << 4);
+                        }
                         int tintColor = 0xFFFFFF;
                         if (template.tinted) {
                             try {

@@ -39,6 +39,8 @@ struct TerrainCorner {
     float3 rgb;
     float  alpha;
     uint   light;
+    float2 tile;
+    float4 tileRect;
 };
 
 constant uint8_t kTerrFaceVerts[6][12] = {
@@ -127,6 +129,8 @@ inline TerrainCorner terr_decode_a(device const uint* w, uint corner, device con
     c.rgb = tint * shade / (255.0f * 255.0f);
     c.alpha = leaf ? (254.0f / 255.0f) : 1.0f;
     c.light = (w2 >> (8u * corner)) & 255u;
+    c.tile = float2(0.0f);
+    c.tileRect = float4(0.0f);
     return c;
 }
 
@@ -177,6 +181,22 @@ inline TerrainCorner terr_decode_b(device const uint* w, uint corner, device con
     c.rgb = tint * shade / (255.0f * 255.0f);
     c.alpha = leaf ? (254.0f / 255.0f) : 1.0f;
     c.light = terr_bits(w, 191u + 8u * corner, 8);
+    c.tile = float2(0.0f);
+    c.tileRect = float4(0.0f);
+    float n1 = float(abs(e1x) + abs(e1y) + abs(e1z)) / 128.0f;
+    float n2 = float(abs(e2x) + abs(e2y) + abs(e2z)) / 128.0f;
+    if (n1 > 1.5f || n2 > 1.5f) {
+        uint p0 = flip ? ((rot + 4u) & 3u) : (rot & 3u);
+        uint p1 = flip ? ((rot + 3u) & 3u) : ((1u + rot) & 3u);
+        bool uAlongE1 = kTerrUvPat[p1][0] != kTerrUvPat[p0][0];
+        float nu = uAlongE1 ? n1 : n2;
+        float nv = uAlongE1 ? n2 : n1;
+        c.tile = float2(kTerrUvPat[p][0] != 0 ? nu : 0.0f, kTerrUvPat[p][1] != 0 ? nv : 0.0f);
+        c.tileRect = float4(su0 + (su1 - su0) * (float(fu0) / 256.0f),
+                            sv0 + (sv1 - sv0) * (float(fv0) / 256.0f),
+                            (su1 - su0) * (float(fu1 - fu0) / 256.0f),
+                            (sv1 - sv0) * (float(fv1 - fv0) / 256.0f)) / float4(65535.0f);
+    }
     return c;
 }
 
@@ -190,6 +210,8 @@ inline TerrainCorner terr_decode_c(device const uint* w, uint corner) {
     c.rgb = col.rgb;
     c.alpha = col.a;
     c.light = uint(raw.packedLight);
+    c.tile = float2(0.0f);
+    c.tileRect = float4(0.0f);
     return c;
 }
 
