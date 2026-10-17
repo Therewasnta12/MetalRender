@@ -2,6 +2,7 @@ package com.pebbles_boon.metalrender.render;
 
 import com.mojang.blaze3d.opengl.GlTexture;
 import com.pebbles_boon.metalrender.MetalRenderClient;
+import com.pebbles_boon.metalrender.backend.metal.MetalTexture;
 import com.pebbles_boon.metalrender.backend.MetalRenderer;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
 import com.pebbles_boon.metalrender.util.MetalLogger;
@@ -378,6 +379,9 @@ public class MetalWeatherRenderer {
             }
             Identifier id = rain ? RAIN_LOCATION : SNOW_LOCATION;
             AbstractTexture tex = mc.getTextureManager().getTexture(id);
+            if (MetalRenderClient.isBackendMode()) {
+                return tex != null && tex.getTexture() instanceof MetalTexture metalTex ? metalTex.handle() : 0;
+            }
             int glId = 0;
             if (tex != null && tex.getTexture() instanceof GlTexture gl) {
                 glId = gl.glId();

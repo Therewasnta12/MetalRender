@@ -2,6 +2,7 @@ package com.pebbles_boon.metalrender.particle;
 
 import com.mojang.blaze3d.opengl.GlTexture;
 import com.pebbles_boon.metalrender.MetalRenderClient;
+import com.pebbles_boon.metalrender.backend.metal.MetalTexture;
 import com.pebbles_boon.metalrender.backend.MetalRenderer;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
 import com.pebbles_boon.metalrender.render.MetalTextureManager;
@@ -452,6 +453,9 @@ public class MetalParticleRenderer {
     }
 
     private long getOrCreateMetalTexture(int glTextureId, Identifier atlasId) {
+        if (MetalRenderClient.isBackendMode()) {
+            return backendTextureHandle(atlasId);
+        }
         if (glTextureId == 0 || device == 0)
             return 0;
         boolean inBounds = glTextureId >= 0 && glTextureId < TEXTURE_CACHE_SIZE;
@@ -525,7 +529,19 @@ public class MetalParticleRenderer {
         return frameCount - lastUpload >= ATLAS_REFRESH_FRAMES;
     }
 
+    private long backendTextureHandle(Identifier atlasId) {
+        Minecraft mc = Minecraft.getInstance();
+        if (atlasId == null || mc == null || mc.getTextureManager() == null) {
+            return 0;
+        }
+        AbstractTexture tex = mc.getTextureManager().getTexture(atlasId);
+        return tex != null && tex.getTexture() instanceof MetalTexture metalTex ? metalTex.handle() : 0;
+    }
+
     private int getGlTextureIdForAtlas(Identifier atlasId) {
+        if (MetalRenderClient.isBackendMode()) {
+            return 0;
+        }
         try {
             Minecraft mc = Minecraft.getInstance();
             if (mc == null)

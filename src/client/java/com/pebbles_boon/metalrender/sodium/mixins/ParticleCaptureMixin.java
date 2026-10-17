@@ -31,7 +31,7 @@ public class ParticleCaptureMixin {
         if (!MetalRenderClient.isEnabled())
             return;
         MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
-        if (worldRenderer == null || !worldRenderer.metalActive())
+        if (worldRenderer == null || !worldRenderer.captureActive())
             return;
         MetalParticleRenderer particleRenderer = worldRenderer.getParticleRenderer();
         if (particleRenderer == null || !particleRenderer.isActive())
