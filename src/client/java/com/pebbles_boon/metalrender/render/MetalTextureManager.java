@@ -102,6 +102,10 @@ public class MetalTextureManager {
             int glTexId = 0;
             var gpuTex = atlasTexture.getTexture();
             if (MetalRenderClient.isBackendMode()) {
+                if (atlasTexture instanceof TextureAtlas atlas) {
+                    com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher
+                            .setAtlasSprites(((TextureAtlasAccessor) atlas).metalrender$getSprites());
+                }
                 borrowBlockAtlas(gpuTex);
                 return;
             }

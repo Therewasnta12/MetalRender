@@ -17,6 +17,7 @@
 #include <dlfcn.h>
 #include <jni.h>
 #include <limits>
+#include <map>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 #include <mach/mach_time.h>
@@ -61,6 +62,9 @@ static id<MTLBuffer> get_buffer(uint64_t h);
 extern "C" int metalrenderSortTranslucency(const float *keys, uint32_t *order,
                                            int count);
 static bool isClusterVisible(int32_t chunkX, int32_t chunkZ);
+static void mr_arena_remove(int32_t cx, int32_t cy, int32_t cz);
+static void mr_arena_clear();
+static void mr_arena_refresh_visibility();
 static bool isGpuCullVisible(uint64_t bufferHandle);
 struct ResolvedBuf {
   id<MTLBuffer> buf;
@@ -162,6 +166,7 @@ static float g_passGpuMs[5] = {0, 0, 0, 0, 0};
 static std::atomic<long long> g_megaAllocCount{0};
 static std::atomic<long long> g_megaFreeCount{0};
 static std::atomic<long long> g_drawnQuadCount{0};
+static std::atomic<long long> g_arenaDrawnQuads{0};
 static std::atomic<long long> g_residentQuadCount{0};
 static std::atomic<long long> g_residentQuadBytes{0};
 
@@ -673,6 +678,8 @@ static int g_rtHeight = 16;
 static float g_scale = 1.0f;
 static int g_frameCount = 0;
 static std::atomic<float> g_lastGpuMs{0.0f};
+extern std::atomic<float> g_backendPassMs[5];
+extern std::atomic<float> g_backendGpuMs;
 uint32_t g_drawCallCount = 0;
 static int g_drawSkipCount = 0;
 static int g_totalDraws = 0;
@@ -3629,6 +3636,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nUnregisterChunkMes
     JNIEnv *, jclass, jint cx, jint cy, jint cz) {
   g_meshRegGeneration.fetch_add(1, std::memory_order_release);
   g_meshRemovalGeneration.fetch_add(1, std::memory_order_release);
+  mr_arena_remove(cx, cy, cz);
   int64_t key = packMeshKey(cx, cy, cz);
   std::unique_lock<std::shared_mutex> lock(g_meshRegMutex);
   auto it = g_meshKeyToIdx.find(key);
@@ -6228,6 +6236,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetClusterCullingE
   if (!g_clusterCullingEnabled) {
     g_visibleClusterKeys.clear();
   }
+  mr_arena_refresh_visibility();
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetTranslucencySortEnabled(
@@ -6241,7 +6250,10 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetVisibleSections
   g_sectionCullingEnabled = false;
   g_visibleSectionKeys.clear();
   g_sectionVisibilityVersion++;
-  if (!keys || count <= 0) return;
+  if (!keys || count <= 0) {
+    mr_arena_refresh_visibility();
+    return;
+  }
   jint length = std::min(count, (jint)env->GetArrayLength(keys));
   jlong *values = env->GetLongArrayElements(keys, nullptr);
   if (!values) return;
@@ -6249,6 +6261,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetVisibleSections
   env->ReleaseLongArrayElements(keys, values, JNI_ABORT);
   g_sectionMeshGeneration = g_meshRegGeneration.load(std::memory_order_acquire);
   g_sectionCullingEnabled = length > 0;
+  mr_arena_refresh_visibility();
 }
 extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nUploadClusterVisibilityKeys(
@@ -6256,6 +6269,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nUploadClusterVisib
   std::lock_guard<std::mutex> lock(g_clusterVisibilityMutex);
   g_visibleClusterKeys.clear();
   if (!keys || count <= 0) {
+    mr_arena_refresh_visibility();
     return;
   }
   jsize length = env->GetArrayLength(keys);
@@ -6268,6 +6282,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nUploadClusterVisib
     g_visibleClusterKeys.insert((int64_t)values[i]);
   }
   env->ReleaseLongArrayElements(keys, values, JNI_ABORT);
+  mr_arena_refresh_visibility();
 }
 static std::atomic<uint32_t> s_lastCullVisible{0};
 struct GpuCullSubChunkCPU {
@@ -6973,6 +6988,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nFlushDeferredDelet
 extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nClearAllChunkRegistrations(
     JNIEnv *, jclass) {
+  mr_arena_clear();
   std::unique_lock<std::shared_mutex> lock(g_meshRegMutex);
 
   for (size_t i = 0; i < g_nativeMeshes.size(); i++) {
@@ -7105,7 +7121,8 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nWatchdogReset(
 extern "C" JNIEXPORT jfloat JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetGpuFrameTimeMs(
     JNIEnv *, jclass) {
-  return g_lastGpuMs.load(std::memory_order_relaxed);
+  float backend = g_backendGpuMs.load(std::memory_order_relaxed);
+  return backend > 0.0f ? backend : g_lastGpuMs.load(std::memory_order_relaxed);
 }
 
 extern "C" JNIEXPORT jdouble JNICALL
@@ -7148,7 +7165,8 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetPassGpuMs(
   jsize len = env->GetArrayLength(out);
   jsize n = len < 5 ? len : 5;
   float tmp[5];
-  for (int i = 0; i < 5; i++) tmp[i] = -1.0f;
+  bool backend = g_backendGpuMs.load(std::memory_order_relaxed) > 0.0f;
+  for (int i = 0; i < 5; i++) tmp[i] = backend ? g_backendPassMs[i].load(std::memory_order_relaxed) : -1.0f;
   env->SetFloatArrayRegion(out, 0, n, tmp);
   return (jint)n;
 }
@@ -7182,7 +7200,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetQuadStats(
   jsize len = env->GetArrayLength(out);
   long long resident = g_residentQuadCount.load(std::memory_order_relaxed);
   long long bytes = g_residentQuadBytes.load(std::memory_order_relaxed);
-  long long drawn = g_drawnQuadCount.load(std::memory_order_relaxed);
+  long long drawn = g_drawnQuadCount.load(std::memory_order_relaxed) + g_arenaDrawnQuads.load(std::memory_order_relaxed);
   jlong vals[4] = {(jlong)resident, (jlong)bytes, (jlong)drawn,
                          (jlong)(resident > 0 ? resident / 64 : 0)};
   jsize n = len < 4 ? len : 4;
@@ -7364,6 +7382,850 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDestroyIndirectCom
   }
 }
 
+extern std::atomic<uint64_t> g_backendFrameInProgress;
+extern std::atomic<uint64_t> g_backendCompletedFrame;
+extern void mr_backend_wait_frame();
+
+struct ArenaSectionRecord {
+  int32_t x, y, z;
+  uint32_t firstUnit, unitCount, lodTier, flags, reserved;
+};
+struct ArenaUnitRecord {
+  uint32_t firstQuad, meta;
+  int32_t plane;
+  uint32_t box;
+};
+struct ArenaCullFrame {
+  int32_t camBlock[4];
+  float camFrac[4];
+  float planes[4][4];
+  float viewDist;
+  uint32_t sectionCount;
+  uint32_t listCapacity;
+  uint32_t pad;
+};
+static_assert(sizeof(ArenaSectionRecord) == 32, "section record");
+static_assert(sizeof(ArenaUnitRecord) == 16, "unit record");
+static_assert(sizeof(ArenaCullFrame) == 96 + 16, "cull frame");
+
+struct ArenaRangeAlloc {
+  std::map<uint32_t, uint32_t> byOff;
+  std::multimap<uint32_t, uint32_t> bySize;
+  uint32_t capacity = 0;
+  uint64_t freeTotal = 0;
+  uint32_t high = 0;
+  void init(uint32_t cap) {
+    byOff.clear();
+    bySize.clear();
+    capacity = cap;
+    freeTotal = 0;
+    high = 0;
+    addFree(0, cap);
+  }
+  void addFree(uint32_t off, uint32_t size) {
+    byOff[off] = size;
+    bySize.insert({size, off});
+    freeTotal += size;
+  }
+  void eraseFree(std::map<uint32_t, uint32_t>::iterator it) {
+    auto range = bySize.equal_range(it->second);
+    for (auto i = range.first; i != range.second; ++i) {
+      if (i->second == it->first) {
+        bySize.erase(i);
+        break;
+      }
+    }
+    freeTotal -= it->second;
+    byOff.erase(it);
+  }
+  bool alloc(uint32_t size, uint32_t &off) {
+    auto it = bySize.lower_bound(size);
+    if (it == bySize.end())
+      return false;
+    uint32_t bo = it->second, bs = it->first;
+    bySize.erase(it);
+    byOff.erase(bo);
+    freeTotal -= bs;
+    off = bo;
+    if (bs > size)
+      addFree(bo + size, bs - size);
+    high = std::max(high, off + size);
+    return true;
+  }
+  void release(uint32_t off, uint32_t size) {
+    auto next = byOff.lower_bound(off);
+    if (next != byOff.end() && off + size == next->first) {
+      size += next->second;
+      eraseFree(next);
+      next = byOff.lower_bound(off);
+    }
+    if (next != byOff.begin()) {
+      auto prev = std::prev(next);
+      if (prev->first + prev->second == off) {
+        off = prev->first;
+        size += prev->second;
+        eraseFree(prev);
+      }
+    }
+    addFree(off, size);
+  }
+  void grow(uint32_t newCap) {
+    release(capacity, newCap - capacity);
+    capacity = newCap;
+  }
+};
+
+struct ArenaSec {
+  uint32_t slot = 0, arenaOff = 0, arenaKiB = 0, unitOff = 0, unitCount = 0;
+  uint32_t quadCount = 0;
+  uint32_t payloadBytes = 0;
+  int32_t cx = 0, cy = 0, cz = 0;
+  uint64_t gen = 0;
+};
+struct ArenaRetire {
+  uint64_t tag = 0;
+  uint32_t slot = 0, arenaOff = 0, arenaKiB = 0, unitOff = 0, unitCount = 0;
+  uint32_t quadCount = 0, payloadBytes = 0;
+  id retired = nil;
+};
+struct ArenaFrameBufs {
+  id<MTLBuffer> arena = nil, sections = nil, units = nil, sprites = nil, lists = nil;
+  uint32_t listCap = 0;
+  int32_t camBlock[4] = {0, 0, 0, 0};
+  float camFrac[4] = {0, 0, 0, 0};
+  bool valid = false;
+};
+
+static std::mutex g_arenaMutex;
+static bool g_arenaReady = false;
+static bool g_arenaInitDone = false;
+static bool g_arenaGpuCull = true;
+static bool g_arenaOracle = false;
+static int g_arenaRenderDistance = 32;
+static uint64_t g_arenaCapBytes = 4096ull << 20;
+static id<MTLBuffer> g_arenaBuf = nil;
+static id<MTLBuffer> g_arenaSecBuf = nil;
+static id<MTLBuffer> g_arenaUnitBuf = nil;
+static id<MTLBuffer> g_arenaSprites = nil;
+static id<MTLBuffer> g_arenaLists[2] = {nil, nil};
+static id<MTLBuffer> g_arenaArgs[2] = {nil, nil};
+static id<MTLBuffer> g_arenaStats[2] = {nil, nil};
+static uint32_t g_arenaListCap = 0;
+static ArenaRangeAlloc g_arenaKiB;
+static ArenaRangeAlloc g_arenaUnits;
+static std::vector<uint32_t> g_arenaSlotFree;
+static uint32_t g_arenaSlotHigh = 0;
+static uint32_t g_arenaSlotCap = 0;
+static std::unordered_map<int64_t, ArenaSec> g_arenaSecs;
+static std::vector<ArenaRetire> g_arenaRetire;
+static uint64_t g_arenaPubCounter = 0;
+static uint64_t g_arenaSetGen = 0;
+static uint64_t g_arenaLiveQuads = 0;
+static uint64_t g_arenaLivePayload = 0;
+static uint64_t g_arenaHighKiB = 0;
+static uint64_t g_arenaEvictions = 0;
+static ArenaFrameBufs g_arenaFrame[2];
+static int g_arenaDrawSlot = -1;
+static std::atomic<int> g_arenaOracleDiffMilli{0};
+static std::atomic<long long> g_arenaOracleCpuQuads[2] = {};
+static std::atomic<uint64_t> g_arenaLastOracleLog{0};
+static id<MTLRenderPipelineState> g_pipelineArena = nil;
+static id<MTLRenderPipelineState> g_pipelineArenaSolid = nil;
+static id<MTLComputePipelineState> g_arenaCullReset = nil;
+static id<MTLComputePipelineState> g_arenaCullMain = nil;
+static id<MTLComputePipelineState> g_arenaCullFinish = nil;
+
+static uint32_t mr_pow2_ceil(uint32_t v) {
+  uint32_t p = 1;
+  while (p < v)
+    p <<= 1;
+  return p;
+}
+
+static void mr_arena_retire_object_locked(id obj) {
+  if (!obj)
+    return;
+  ArenaRetire r;
+  r.tag = g_backendFrameInProgress.load(std::memory_order_acquire);
+  r.retired = obj;
+  g_arenaRetire.push_back(r);
+}
+
+static bool mr_arena_alloc_buffers_locked() {
+  uint32_t sectionCap = mr_pow2_ceil((uint32_t)((2 * g_arenaRenderDistance + 1) * (2 * g_arenaRenderDistance + 1) * 24));
+  sectionCap = std::max(sectionCap, 4096u);
+  uint32_t unitCap = sectionCap * 12;
+  uint64_t arenaStart = std::min<uint64_t>(256ull << 20, g_arenaCapBytes);
+  g_arenaBuf = [g_device newBufferWithLength:(NSUInteger)arenaStart options:MTLResourceStorageModeShared];
+  g_arenaSecBuf = [g_device newBufferWithLength:sectionCap * sizeof(ArenaSectionRecord)
+                                        options:MTLResourceStorageModeShared];
+  g_arenaUnitBuf = [g_device newBufferWithLength:(NSUInteger)unitCap * sizeof(ArenaUnitRecord)
+                                         options:MTLResourceStorageModeShared];
+  g_arenaListCap = std::min<uint32_t>(unitCap, 524288u);
+  for (int i = 0; i < 2; i++) {
+    g_arenaLists[i] = [g_device newBufferWithLength:(NSUInteger)g_arenaListCap * 64 options:MTLResourceStorageModeShared];
+    g_arenaArgs[i] = [g_device newBufferWithLength:128 options:MTLResourceStorageModeShared];
+    g_arenaStats[i] = [g_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+  }
+  if (!g_arenaBuf || !g_arenaSecBuf || !g_arenaUnitBuf || !g_arenaLists[0] || !g_arenaLists[1] || !g_arenaArgs[0] ||
+      !g_arenaArgs[1] || !g_arenaStats[0] || !g_arenaStats[1])
+    return false;
+  memset([g_arenaSecBuf contents], 0, g_arenaSecBuf.length);
+  g_arenaKiB.init((uint32_t)(arenaStart / 1024));
+  g_arenaUnits.init(unitCap);
+  g_arenaSlotCap = sectionCap;
+  g_arenaSlotHigh = 0;
+  g_arenaSlotFree.clear();
+  return true;
+}
+
+static bool mr_arena_grow_arena_locked() {
+  uint64_t cur = g_arenaBuf.length;
+  uint64_t limit = std::min<uint64_t>(g_arenaCapBytes, g_device.maxBufferLength / 2);
+  if (cur >= limit)
+    return false;
+  uint64_t next = std::min<uint64_t>(cur * 2, limit);
+  id<MTLBuffer> nb = [g_device newBufferWithLength:(NSUInteger)next options:MTLResourceStorageModeShared];
+  if (!nb)
+    return false;
+  memcpy([nb contents], [g_arenaBuf contents], (size_t)cur);
+  mr_arena_retire_object_locked(g_arenaBuf);
+  g_arenaBuf = nb;
+  g_arenaKiB.grow((uint32_t)(next / 1024));
+  return true;
+}
+
+static bool mr_arena_grow_units_locked() {
+  uint32_t cur = g_arenaUnits.capacity;
+  uint32_t next = cur * 2;
+  id<MTLBuffer> nb = [g_device newBufferWithLength:(NSUInteger)next * sizeof(ArenaUnitRecord)
+                                           options:MTLResourceStorageModeShared];
+  if (!nb)
+    return false;
+  memcpy([nb contents], [g_arenaUnitBuf contents], (size_t)cur * sizeof(ArenaUnitRecord));
+  mr_arena_retire_object_locked(g_arenaUnitBuf);
+  g_arenaUnitBuf = nb;
+  g_arenaUnits.grow(next);
+  return true;
+}
+
+static bool mr_arena_grow_sections_locked() {
+  uint32_t cur = g_arenaSlotCap;
+  uint32_t next = cur * 2;
+  id<MTLBuffer> nb = [g_device newBufferWithLength:(NSUInteger)next * sizeof(ArenaSectionRecord)
+                                           options:MTLResourceStorageModeShared];
+  if (!nb)
+    return false;
+  memset([nb contents], 0, nb.length);
+  memcpy([nb contents], [g_arenaSecBuf contents], (size_t)cur * sizeof(ArenaSectionRecord));
+  mr_arena_retire_object_locked(g_arenaSecBuf);
+  g_arenaSecBuf = nb;
+  g_arenaSlotCap = next;
+  return true;
+}
+
+static void mr_arena_retire_section_locked(const ArenaSec &sec) {
+  ArenaSectionRecord *recs = (ArenaSectionRecord *)[g_arenaSecBuf contents];
+  __atomic_store_n(&recs[sec.slot].flags, 0u, __ATOMIC_RELEASE);
+  ArenaRetire r;
+  r.tag = g_backendFrameInProgress.load(std::memory_order_acquire);
+  r.slot = sec.slot;
+  r.arenaOff = sec.arenaOff;
+  r.arenaKiB = sec.arenaKiB;
+  r.unitOff = sec.unitOff;
+  r.unitCount = sec.unitCount;
+  r.quadCount = sec.quadCount;
+  r.payloadBytes = sec.payloadBytes;
+  g_arenaRetire.push_back(r);
+  g_arenaLiveQuads -= sec.quadCount;
+  g_arenaLivePayload -= sec.payloadBytes;
+}
+
+static void mr_arena_collect_locked() {
+  uint64_t completed = g_backendCompletedFrame.load(std::memory_order_acquire);
+  size_t write = 0;
+  for (size_t i = 0; i < g_arenaRetire.size(); i++) {
+    ArenaRetire &r = g_arenaRetire[i];
+    if (r.tag > completed) {
+      if (write != i)
+        g_arenaRetire[write] = r;
+      write++;
+      continue;
+    }
+    if (r.retired) {
+      [r.retired release];
+      continue;
+    }
+    if (r.arenaKiB)
+      g_arenaKiB.release(r.arenaOff, r.arenaKiB);
+    if (r.unitCount)
+      g_arenaUnits.release(r.unitOff, r.unitCount);
+    g_arenaSlotFree.push_back(r.slot);
+  }
+  g_arenaRetire.resize(write);
+}
+
+static void mr_arena_visibility_locked(bool sectionActive, const std::unordered_set<int64_t> &sectionKeys,
+                                       bool clusterActive, const std::unordered_set<int64_t> &clusterKeys) {
+  if (!g_arenaSecBuf)
+    return;
+  ArenaSectionRecord *recs = (ArenaSectionRecord *)[g_arenaSecBuf contents];
+  for (auto &entry : g_arenaSecs) {
+    const ArenaSec &sec = entry.second;
+    bool vis = true;
+    if (sectionActive && sec.gen <= g_arenaSetGen && sectionKeys.count(entry.first) == 0)
+      vis = false;
+    if (vis && clusterActive) {
+      int clusterX = (int)floor((double)sec.cx / 8.0);
+      int clusterZ = (int)floor((double)sec.cz / 8.0);
+      int64_t ck = ((int64_t)clusterX << 32) | (uint32_t)clusterZ;
+      if (clusterKeys.count(ck) == 0)
+        vis = false;
+    }
+    uint32_t flags = vis ? 3u : 1u;
+    __atomic_store_n(&recs[sec.slot].flags, flags, __ATOMIC_RELEASE);
+  }
+}
+
+static void mr_arena_refresh_visibility() {
+  std::lock_guard<std::mutex> lock(g_arenaMutex);
+  g_arenaSetGen = g_arenaPubCounter;
+  mr_arena_visibility_locked(g_sectionCullingEnabled, g_visibleSectionKeys, g_clusterCullingEnabled,
+                             g_visibleClusterKeys);
+}
+
+static void mr_arena_remove(int32_t cx, int32_t cy, int32_t cz) {
+  std::lock_guard<std::mutex> lock(g_arenaMutex);
+  if (!g_arenaReady)
+    return;
+  auto it = g_arenaSecs.find(packMeshKey(cx, cy, cz));
+  if (it == g_arenaSecs.end())
+    return;
+  mr_arena_retire_section_locked(it->second);
+  g_arenaSecs.erase(it);
+}
+
+static void mr_arena_clear() {
+  std::lock_guard<std::mutex> lock(g_arenaMutex);
+  if (!g_arenaReady)
+    return;
+  for (auto &entry : g_arenaSecs)
+    mr_arena_retire_section_locked(entry.second);
+  g_arenaSecs.clear();
+}
+
+static void mr_arena_evict_locked() {
+  uint64_t capKiB = g_arenaCapBytes / 1024;
+  uint64_t usedKiB = g_arenaKiB.capacity - g_arenaKiB.freeTotal;
+  if (g_arenaBuf.length < g_arenaCapBytes && g_arenaBuf.length < g_device.maxBufferLength / 2)
+    return;
+  if (usedKiB * 10 <= capKiB * 9)
+    return;
+  std::vector<std::pair<double, int64_t>> order;
+  order.reserve(g_arenaSecs.size());
+  for (auto &entry : g_arenaSecs) {
+    double dx = (double)entry.second.cx * 16.0 + 8.0 - g_camX;
+    double dz = (double)entry.second.cz * 16.0 + 8.0 - g_camZ;
+    order.push_back({dx * dx + dz * dz, entry.first});
+  }
+  std::sort(order.begin(), order.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+  uint64_t retiredKiB = 0;
+  for (auto &o : order) {
+    if ((usedKiB - retiredKiB) * 10 <= capKiB * 8)
+      break;
+    auto it = g_arenaSecs.find(o.second);
+    if (it == g_arenaSecs.end())
+      continue;
+    retiredKiB += it->second.arenaKiB;
+    mr_arena_retire_section_locked(it->second);
+    g_arenaSecs.erase(it);
+    g_arenaEvictions++;
+  }
+}
+
+static bool mr_arena_ensure_pipelines() {
+  if (g_pipelineArena && g_arenaCullMain)
+    return true;
+  if (!g_shaderLibrary || !g_device)
+    return false;
+  id<MTLFunction> vs = [g_shaderLibrary newFunctionWithName:@"terrain_vs"];
+  id<MTLFunction> fs = [g_shaderLibrary newFunctionWithName:@"fragment_terrain_opaque"];
+  if (!vs || !fs) {
+    dbg("arena: terrain_vs or fragment missing\n");
+    return false;
+  }
+  MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
+  desc.vertexFunction = vs;
+  desc.fragmentFunction = fs;
+  desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+  desc.colorAttachments[0].blendingEnabled = NO;
+  desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+  desc.label = @"ArenaTerrain";
+  NSError *error = nil;
+  g_pipelineArena = makePipeline(desc, &error);
+  [desc release];
+  if (!g_pipelineArena) {
+    dbg("arena: pipeline failed: %s\n", error ? [[error localizedDescription] UTF8String] : "unknown");
+    return false;
+  }
+  id<MTLFunction> fsSolid = [g_shaderLibrary newFunctionWithName:@"fragment_terrain_solid"];
+  if (!fsSolid)
+    return false;
+  MTLRenderPipelineDescriptor *solidDesc = [[MTLRenderPipelineDescriptor alloc] init];
+  solidDesc.vertexFunction = vs;
+  solidDesc.fragmentFunction = fsSolid;
+  solidDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+  solidDesc.colorAttachments[0].blendingEnabled = NO;
+  solidDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+  solidDesc.label = @"ArenaTerrainSolid";
+  g_pipelineArenaSolid = makePipeline(solidDesc, &error);
+  [solidDesc release];
+  if (!g_pipelineArenaSolid)
+    return false;
+  NSString *names[3] = {@"terrain_cull_reset", @"terrain_cull", @"terrain_cull_finish"};
+  id<MTLComputePipelineState> *targets[3] = {&g_arenaCullReset, &g_arenaCullMain, &g_arenaCullFinish};
+  for (int i = 0; i < 3; i++) {
+    id<MTLFunction> fn = [g_shaderLibrary newFunctionWithName:names[i]];
+    if (!fn) {
+      dbg("arena: compute function %s missing\n", [names[i] UTF8String]);
+      return false;
+    }
+    *targets[i] = [g_device newComputePipelineStateWithFunction:fn error:&error];
+    if (!*targets[i]) {
+      dbg("arena: compute pipeline failed: %s\n", error ? [[error localizedDescription] UTF8String] : "unknown");
+      return false;
+    }
+  }
+  return true;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nArenaConfigure(
+    JNIEnv *, jclass, jint renderDistance, jint capMb, jboolean gpuCull, jboolean oracle) {
+  @autoreleasepool {
+    std::lock_guard<std::mutex> lock(g_arenaMutex);
+    g_arenaGpuCull = gpuCull == JNI_TRUE;
+    g_arenaOracle = oracle == JNI_TRUE;
+    if (g_arenaInitDone)
+      return g_arenaReady ? JNI_TRUE : JNI_FALSE;
+    g_arenaInitDone = true;
+    if (!g_device || !g_queue)
+      return JNI_FALSE;
+    if (@available(macOS 13.0, *)) {
+      if (![g_device supportsFamily:MTLGPUFamilyApple7])
+        return JNI_FALSE;
+    } else {
+      return JNI_FALSE;
+    }
+    g_arenaRenderDistance = std::max(2, std::min(64, (int)renderDistance));
+    g_arenaCapBytes = (uint64_t)std::max(256, (int)capMb) << 20;
+    if (!mr_arena_ensure_pipelines())
+      return JNI_FALSE;
+    if (!mr_arena_alloc_buffers_locked())
+      return JNI_FALSE;
+    if (!g_arenaSprites) {
+      g_arenaSprites = [g_device newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+      memset([g_arenaSprites contents], 0, 4096);
+    }
+    g_arenaReady = true;
+    dbg("arena ready: renderDistance=%d capMb=%d gpuCull=%d\n", g_arenaRenderDistance, (int)capMb,
+        g_arenaGpuCull ? 1 : 0);
+    return JNI_TRUE;
+  }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nArenaReady(JNIEnv *, jclass) {
+  return g_arenaReady ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nArenaSetSprites(
+    JNIEnv *env, jclass, jobject data, jint count) {
+  void *bytes = data ? env->GetDirectBufferAddress(data) : nullptr;
+  if (!bytes || count <= 0 || !g_device)
+    return;
+  id<MTLBuffer> nb = [g_device newBufferWithBytes:bytes
+                                           length:(NSUInteger)count * 8
+                                          options:MTLResourceStorageModeShared];
+  std::lock_guard<std::mutex> lock(g_arenaMutex);
+  if (g_arenaSprites)
+    mr_arena_retire_object_locked(g_arenaSprites);
+  g_arenaSprites = nb;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nArenaPublish(
+    JNIEnv *env, jclass, jint cx, jint cy, jint cz, jint lodTier, jobject quads, jint quadBytes, jobject units,
+    jint unitCount, jint quadCount) {
+  uint8_t *quadPtr = quads ? (uint8_t *)env->GetDirectBufferAddress(quads) : nullptr;
+  uint8_t *unitPtr = units ? (uint8_t *)env->GetDirectBufferAddress(units) : nullptr;
+  std::lock_guard<std::mutex> lock(g_arenaMutex);
+  if (!g_arenaReady)
+    return JNI_FALSE;
+  int64_t key = packMeshKey(cx, cy, cz);
+  auto old = g_arenaSecs.find(key);
+  if (unitCount <= 0 || quadBytes <= 0 || !quadPtr || !unitPtr) {
+    if (old != g_arenaSecs.end()) {
+      mr_arena_retire_section_locked(old->second);
+      g_arenaSecs.erase(old);
+    }
+    return JNI_TRUE;
+  }
+  uint32_t kib = ((uint32_t)quadBytes + 1023u) / 1024u;
+  uint32_t arenaOff = 0;
+  while (!g_arenaKiB.alloc(kib, arenaOff)) {
+    if (!mr_arena_grow_arena_locked()) {
+      mr_arena_evict_locked();
+      mr_arena_collect_locked();
+      if (!g_arenaKiB.alloc(kib, arenaOff))
+        return JNI_FALSE;
+      break;
+    }
+  }
+  uint32_t unitOff = 0;
+  while (!g_arenaUnits.alloc((uint32_t)unitCount, unitOff)) {
+    if (!mr_arena_grow_units_locked()) {
+      g_arenaKiB.release(arenaOff, kib);
+      return JNI_FALSE;
+    }
+  }
+  uint32_t slot;
+  if (!g_arenaSlotFree.empty()) {
+    slot = g_arenaSlotFree.back();
+    g_arenaSlotFree.pop_back();
+  } else {
+    if (g_arenaSlotHigh >= g_arenaSlotCap && !mr_arena_grow_sections_locked()) {
+      g_arenaKiB.release(arenaOff, kib);
+      g_arenaUnits.release(unitOff, (uint32_t)unitCount);
+      return JNI_FALSE;
+    }
+    slot = g_arenaSlotHigh++;
+  }
+  memcpy((uint8_t *)[g_arenaBuf contents] + (size_t)arenaOff * 1024, quadPtr, (size_t)quadBytes);
+  uint32_t baseQuad = (uint32_t)(((uint64_t)arenaOff * 1024) / 16);
+  ArenaUnitRecord *dstUnits = (ArenaUnitRecord *)[g_arenaUnitBuf contents] + unitOff;
+  const ArenaUnitRecord *srcUnits = (const ArenaUnitRecord *)unitPtr;
+  for (int i = 0; i < unitCount; i++) {
+    dstUnits[i] = srcUnits[i];
+    dstUnits[i].firstQuad += baseQuad;
+  }
+  ArenaSectionRecord *rec = (ArenaSectionRecord *)[g_arenaSecBuf contents] + slot;
+  rec->x = cx * 16;
+  rec->y = cy * 16;
+  rec->z = cz * 16;
+  rec->firstUnit = unitOff;
+  rec->unitCount = (uint32_t)unitCount;
+  rec->lodTier = (uint32_t)lodTier;
+  rec->reserved = 0;
+  std::atomic_thread_fence(std::memory_order_release);
+  __atomic_store_n(&rec->flags, 3u, __ATOMIC_RELEASE);
+  if (old != g_arenaSecs.end()) {
+    mr_arena_retire_section_locked(old->second);
+  }
+  ArenaSec sec;
+  sec.slot = slot;
+  sec.arenaOff = arenaOff;
+  sec.arenaKiB = kib;
+  sec.unitOff = unitOff;
+  sec.unitCount = (uint32_t)unitCount;
+  sec.quadCount = (uint32_t)quadCount;
+  sec.payloadBytes = (uint32_t)quadBytes;
+  sec.cx = cx;
+  sec.cy = cy;
+  sec.cz = cz;
+  sec.gen = ++g_arenaPubCounter;
+  g_arenaSecs[key] = sec;
+  g_arenaLiveQuads += sec.quadCount;
+  g_arenaLivePayload += sec.payloadBytes;
+  g_arenaHighKiB = std::max<uint64_t>(g_arenaHighKiB, g_arenaKiB.capacity - g_arenaKiB.freeTotal);
+  return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nArenaClear(JNIEnv *, jclass) {
+  mr_arena_clear();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nArenaStats(JNIEnv *env, jclass, jlongArray out) {
+  if (!out)
+    return 0;
+  jlong values[10] = {0};
+  {
+    std::lock_guard<std::mutex> lock(g_arenaMutex);
+    if (g_arenaReady) {
+      values[0] = (jlong)((uint64_t)(g_arenaKiB.capacity - g_arenaKiB.freeTotal) * 1024);
+      values[1] = (jlong)((uint64_t)g_arenaKiB.capacity * 1024);
+      values[2] = (jlong)(g_arenaKiB.freeTotal * 1024);
+      values[3] = (jlong)g_arenaKiB.byOff.size();
+      values[4] = (jlong)(g_arenaHighKiB * 1024);
+      values[5] = (jlong)g_arenaLiveQuads;
+      values[6] = (jlong)g_arenaLivePayload;
+      values[7] = (jlong)g_arenaEvictions;
+    }
+  }
+  values[8] = (jlong)g_arenaOracleDiffMilli.load(std::memory_order_relaxed);
+  values[9] = (jlong)g_arenaDrawnQuads.load(std::memory_order_relaxed);
+  jsize len = env->GetArrayLength(out);
+  env->SetLongArrayRegion(out, 0, std::min<jsize>(len, 10), values);
+  return 10;
+}
+
+static void mr_arena_fill_cull_frame(ArenaCullFrame &f, uint32_t sectionCount, uint32_t listCap) {
+  float vp[16];
+  for (int c = 0; c < 4; c++) {
+    for (int r = 0; r < 4; r++) {
+      float sum = 0;
+      for (int k = 0; k < 4; k++)
+        sum += g_projMatrix[k * 4 + r] * g_mvMatrix[c * 4 + k];
+      vp[c * 4 + r] = sum;
+    }
+  }
+  float planes[24];
+  extractFrustumPlanes(vp, planes);
+  double fx = floor(g_camX), fy = floor(g_camY), fz = floor(g_camZ);
+  f.camBlock[0] = (int32_t)fx;
+  f.camBlock[1] = (int32_t)fy;
+  f.camBlock[2] = (int32_t)fz;
+  f.camBlock[3] = 0;
+  f.camFrac[0] = (float)(g_camX - fx);
+  f.camFrac[1] = (float)(g_camY - fy);
+  f.camFrac[2] = (float)(g_camZ - fz);
+  f.camFrac[3] = 0.0f;
+  memcpy(f.planes, planes, sizeof(float) * 16);
+  f.viewDist = (float)g_configuredRenderDistBlocks;
+  f.sectionCount = sectionCount;
+  f.listCapacity = listCap;
+  f.pad = 0;
+}
+
+static bool mr_arena_box_visible(const ArenaCullFrame &f, const float lo[3], const float hi[3]) {
+  for (int i = 0; i < 4; i++) {
+    const float *pl = f.planes[i];
+    float px = pl[0] > 0.0f ? hi[0] : lo[0];
+    float py = pl[1] > 0.0f ? hi[1] : lo[1];
+    float pz = pl[2] > 0.0f ? hi[2] : lo[2];
+    if (pl[0] * px + pl[1] * py + pl[2] * pz + pl[3] < -0.5f)
+      return false;
+  }
+  return true;
+}
+
+static bool mr_arena_unit_keep(const ArenaUnitRecord &unit, const float cam[3], const float rel[3],
+                               const ArenaCullFrame &f) {
+  uint32_t bucket = (unit.meta >> 5) & 7u;
+  if (bucket < 6u) {
+    float plane = (float)unit.plane / 256.0f;
+    uint32_t axis = bucket >> 1;
+    float c = axis == 0 ? cam[1] : (axis == 1 ? cam[2] : cam[0]);
+    if ((bucket & 1u) != 0u) {
+      if (!(c > plane - 1.0f / 64.0f))
+        return false;
+    } else {
+      if (!(c < plane + 1.0f / 64.0f))
+        return false;
+    }
+  }
+  uint32_t b = unit.box;
+  float lo[3] = {rel[0] + (float)(b & 31u) - 8.0f, rel[1] + (float)((b >> 5) & 31u) - 8.0f,
+                 rel[2] + (float)((b >> 10) & 31u) - 8.0f};
+  float hi[3] = {rel[0] + (float)((b >> 15) & 31u) - 8.0f, rel[1] + (float)((b >> 20) & 31u) - 8.0f,
+                 rel[2] + (float)((b >> 25) & 31u) - 8.0f};
+  return mr_arena_box_visible(f, lo, hi);
+}
+
+static void mr_arena_cpu_cull(const ArenaCullFrame &f, const ArenaSectionRecord *secs, const ArenaUnitRecord *units,
+                              uint32_t *lists, uint32_t *args, uint64_t &quadsOut, uint64_t &unitsOut) {
+  uint32_t counts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  uint64_t quads = 0, kept = 0;
+  for (uint32_t s = 0; s < f.sectionCount; s++) {
+    ArenaSectionRecord sec = secs[s];
+    if ((sec.flags & 3u) != 3u)
+      continue;
+    float rel[3] = {(float)(sec.x - f.camBlock[0]) - f.camFrac[0], (float)(sec.y - f.camBlock[1]) - f.camFrac[1],
+                    (float)(sec.z - f.camBlock[2]) - f.camFrac[2]};
+    float dx = rel[0] + 8.0f, dz = rel[2] + 8.0f;
+    float lim = f.viewDist + 16.0f;
+    if (dx * dx + dz * dz > lim * lim)
+      continue;
+    float lo[3] = {rel[0], rel[1], rel[2]};
+    float hi[3] = {rel[0] + 16.0f, rel[1] + 16.0f, rel[2] + 16.0f};
+    if (!mr_arena_box_visible(f, lo, hi))
+      continue;
+    float cam[3] = {-rel[0], -rel[1], -rel[2]};
+    for (uint32_t u = 0; u < sec.unitCount; u++) {
+      const ArenaUnitRecord &unit = units[sec.firstUnit + u];
+      if (!mr_arena_unit_keep(unit, cam, rel, f))
+        continue;
+      uint32_t layer = (unit.meta >> 10) & 3u;
+      if (layer > 1)
+        continue;
+      uint32_t n = (unit.meta & 31u) + 1u;
+      uint32_t cls = n <= 4 ? 0 : (n <= 8 ? 1 : (n <= 16 ? 2 : 3));
+      uint32_t li = layer * 4 + cls;
+      uint32_t k = counts[li]++;
+      quads += (unit.meta & 31u) + 1u;
+      kept++;
+      if (lists && k < f.listCapacity) {
+        uint32_t *dst = lists + ((size_t)li * f.listCapacity + k) * 2;
+        dst[0] = sec.firstUnit + u;
+        dst[1] = s;
+      }
+    }
+  }
+  if (args) {
+    static const uint32_t classVerts[4] = {24, 48, 96, 192};
+    for (int li = 0; li < 8; li++) {
+      args[li * 4 + 0] = classVerts[li & 3];
+      args[li * 4 + 1] = std::min(counts[li], f.listCapacity);
+      args[li * 4 + 2] = 0;
+      args[li * 4 + 3] = 0;
+    }
+  }
+  quadsOut = quads;
+  unitsOut = kept;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nTerrainPrepare(JNIEnv *, jclass) {
+  if (!g_arenaReady)
+    return;
+  @autoreleasepool {
+    mr_backend_wait_frame();
+    std::lock_guard<std::mutex> lock(g_arenaMutex);
+    mr_arena_collect_locked();
+    mr_arena_evict_locked();
+    int slot = (int)(g_backendFrameInProgress.load(std::memory_order_acquire) & 1u);
+    ArenaFrameBufs &fb = g_arenaFrame[slot];
+    [fb.arena release];
+    [fb.sections release];
+    [fb.units release];
+    [fb.sprites release];
+    [fb.lists release];
+    fb.arena = [g_arenaBuf retain];
+    fb.sections = [g_arenaSecBuf retain];
+    fb.units = [g_arenaUnitBuf retain];
+    fb.sprites = [g_arenaSprites retain];
+    fb.lists = [g_arenaLists[slot] retain];
+    fb.listCap = g_arenaListCap;
+    fb.valid = true;
+    g_arenaDrawSlot = slot;
+    ArenaCullFrame frame;
+    mr_arena_fill_cull_frame(frame, g_arenaSlotHigh, g_arenaListCap);
+    memcpy(fb.camBlock, frame.camBlock, sizeof(fb.camBlock));
+    memcpy(fb.camFrac, frame.camFrac, sizeof(fb.camFrac));
+    ArenaSectionRecord *secs = (ArenaSectionRecord *)[g_arenaSecBuf contents];
+    ArenaUnitRecord *units = (ArenaUnitRecord *)[g_arenaUnitBuf contents];
+    id<MTLBuffer> argsBuf = g_arenaArgs[slot];
+    id<MTLBuffer> statsBuf = g_arenaStats[slot];
+    if (!g_arenaGpuCull || g_arenaOracle) {
+      uint64_t quads = 0, kept = 0;
+      if (!g_arenaGpuCull) {
+        mr_arena_cpu_cull(frame, secs, units, (uint32_t *)[fb.lists contents], (uint32_t *)[argsBuf contents], quads,
+                          kept);
+        g_arenaDrawnQuads.store((long long)quads, std::memory_order_relaxed);
+      } else {
+        mr_arena_cpu_cull(frame, secs, units, nullptr, nullptr, quads, kept);
+        g_arenaOracleCpuQuads[slot].store((long long)quads, std::memory_order_relaxed);
+      }
+    }
+    if (g_arenaGpuCull && g_arenaSlotHigh > 0 && g_arenaCullMain) {
+      id<MTLCommandBuffer> cb = [g_queue commandBuffer];
+      cb.label = @"metalrender arena cull";
+      id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+      [ce setComputePipelineState:g_arenaCullReset];
+      [ce setBuffer:argsBuf offset:0 atIndex:0];
+      [ce setBuffer:statsBuf offset:0 atIndex:1];
+      [ce dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [ce setComputePipelineState:g_arenaCullMain];
+      [ce setBytes:&frame length:sizeof(frame) atIndex:0];
+      [ce setBuffer:g_arenaSecBuf offset:0 atIndex:1];
+      [ce setBuffer:g_arenaUnitBuf offset:0 atIndex:2];
+      [ce setBuffer:argsBuf offset:0 atIndex:3];
+      [ce setBuffer:fb.lists offset:0 atIndex:4];
+      [ce setBuffer:statsBuf offset:0 atIndex:5];
+      NSUInteger groups = (frame.sectionCount + 63) / 64;
+      [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+      [ce setComputePipelineState:g_arenaCullFinish];
+      [ce setBuffer:argsBuf offset:0 atIndex:0];
+      [ce setBytes:&frame length:sizeof(frame) atIndex:1];
+      [ce dispatchThreads:MTLSizeMake(8, 1, 1) threadsPerThreadgroup:MTLSizeMake(8, 1, 1)];
+      [ce endEncoding];
+      bool oracle = g_arenaOracle;
+      [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+        const uint32_t *st = (const uint32_t *)[statsBuf contents];
+        long long gpuQuads = (long long)st[1];
+        g_arenaDrawnQuads.store(gpuQuads, std::memory_order_relaxed);
+        if (oracle) {
+          long long cpuQuads = g_arenaOracleCpuQuads[slot].load(std::memory_order_relaxed);
+          double diff = 0.0;
+          if (cpuQuads > 0 || gpuQuads > 0)
+            diff = 100.0 * fabs((double)gpuQuads - (double)cpuQuads) / (double)std::max(cpuQuads, gpuQuads);
+          g_arenaOracleDiffMilli.store((int)(diff * 1000.0), std::memory_order_relaxed);
+          uint64_t now = mach_absolute_time();
+          uint64_t last = g_arenaLastOracleLog.load(std::memory_order_relaxed);
+          ensureTimebase();
+          if (now - last > (uint64_t)(1.0e9 * g_cachedTimebase.denom / g_cachedTimebase.numer)) {
+            g_arenaLastOracleLog.store(now, std::memory_order_relaxed);
+            dbg("ORACLE gpu=%lld cpu=%lld\n", gpuQuads, cpuQuads);
+          }
+        }
+      }];
+      [cb commit];
+    } else if (g_arenaGpuCull) {
+      uint32_t *a = (uint32_t *)[argsBuf contents];
+      static const uint32_t classVerts[4] = {24, 48, 96, 192};
+      for (int li = 0; li < 8; li++) {
+        a[li * 4 + 0] = classVerts[li & 3];
+        a[li * 4 + 1] = 0;
+        a[li * 4 + 2] = 0;
+        a[li * 4 + 3] = 0;
+      }
+      g_arenaDrawnQuads.store(0, std::memory_order_relaxed);
+    }
+  }
+}
+
+static void mr_arena_encode(id<MTLRenderCommandEncoder> enc) {
+  if (!g_arenaReady || g_arenaDrawSlot < 0 || !g_pipelineArena)
+    return;
+  ArenaFrameBufs &fb = g_arenaFrame[g_arenaDrawSlot];
+  if (!fb.valid || !fb.arena || !fb.sprites)
+    return;
+  g_arenaDrawSlot = -1;
+  if (g_depthState)
+    [enc setDepthStencilState:g_depthState];
+  [enc setFrontFacingWinding:mr_ext_winding()];
+  [enc setCullMode:MTLCullModeBack];
+  [enc setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+  [enc setVertexBytes:g_projMatrix length:64 atIndex:1];
+  [enc setVertexBytes:g_mvMatrix length:64 atIndex:2];
+  float camPos[4] = {0.0f, 0.0f, 0.0f, g_skyBrightness};
+  [enc setVertexBytes:camPos length:16 atIndex:3];
+  struct {
+    int32_t camBlock[4];
+    float camFrac[4];
+  } tf;
+  memcpy(tf.camBlock, fb.camBlock, sizeof(tf.camBlock));
+  memcpy(tf.camFrac, fb.camFrac, sizeof(tf.camFrac));
+  [enc setVertexBytes:&tf length:sizeof(tf) atIndex:4];
+  [enc setVertexBuffer:fb.arena offset:0 atIndex:5];
+  [enc setVertexBuffer:fb.units offset:0 atIndex:6];
+  [enc setVertexBuffer:fb.sections offset:0 atIndex:7];
+  [enc setVertexBuffer:fb.sprites offset:0 atIndex:8];
+  [enc setFragmentBytes:&g_fogUniforms length:sizeof(g_fogUniforms) atIndex:6];
+  int slot = (int)(&fb - g_arenaFrame);
+  for (int li = 0; li < 8; li++) {
+    [enc setRenderPipelineState:mr_ext_pso(li < 4 ? g_pipelineArenaSolid : g_pipelineArena)];
+    [enc setVertexBuffer:fb.lists offset:(NSUInteger)li * fb.listCap * 8 atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle
+              indirectBuffer:g_arenaArgs[slot]
+        indirectBufferOffset:(NSUInteger)li * 16];
+    g_drawCallCount++;
+  }
+}
+
 static void mr_apply_external_state(id<MTLRenderCommandEncoder> enc, int width, int height) {
   g_externalMode = true;
   g_useProgrammableBlending = false;
@@ -7406,6 +8268,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nTerrainExternalDra
     return 0;
   @autoreleasepool {
     mr_apply_external_state(enc, width, height);
+    mr_arena_encode(enc);
     jint drawn = Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChunks(
         env, cls, 1, indexBuffer);
     mr_release_external_encoder();

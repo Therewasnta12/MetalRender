@@ -215,6 +215,25 @@ public final class NativeBridge {
 
     public static native int nGetPassGpuMs(float[] out);
 
+    public static native int nPreciseSleep(long nanos);
+
+    public static native long nGetPhysicalMemory();
+
+    public static native boolean nArenaConfigure(int renderDistance, int capMb, boolean gpuCull, boolean oracle);
+
+    public static native boolean nArenaReady();
+
+    public static native void nArenaSetSprites(java.nio.ByteBuffer data, int count);
+
+    public static native boolean nArenaPublish(int cx, int cy, int cz, int lodTier, java.nio.ByteBuffer quads,
+            int quadBytes, java.nio.ByteBuffer units, int unitCount, int quadCount);
+
+    public static native void nArenaClear();
+
+    public static native int nArenaStats(long[] out);
+
+    public static native void nTerrainPrepare();
+
     public static native int nGetCullFailsafeFrames();
 
     public static native int nGetMegaStats(long[] out);
