@@ -49,7 +49,7 @@ public class EntityRenderMixin {
             return;
         }
         MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
-        if (worldRenderer == null || !worldRenderer.metalActive()) {
+        if (worldRenderer == null || !worldRenderer.captureActive()) {
             return;
         }
         MetalEntityRenderer entityRenderer = worldRenderer.getEntityRenderer();
@@ -117,7 +117,7 @@ public class EntityRenderMixin {
             return;
         }
         MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
-        if (worldRenderer != null && worldRenderer.metalActive()) {
+        if (worldRenderer != null && worldRenderer.captureActive()) {
             ci.cancel();
         }
     }

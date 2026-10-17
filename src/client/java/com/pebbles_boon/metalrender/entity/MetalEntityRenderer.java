@@ -23,6 +23,7 @@ import net.minecraft.client.renderer.entity.LivingEntityRenderer;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.state.level.BlockBreakingRenderState;
 import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
@@ -157,7 +158,7 @@ public class MetalEntityRenderer {
         count++;
     }
 
-    public void buildMeshes(long ctx) {
+    public void buildMeshes(long ctx, java.util.List<BlockBreakingRenderState> breakingStates) {
         if (!active || ctx == 0 || device == 0) {
             return;
         }
@@ -259,6 +260,26 @@ public class MetalEntityRenderer {
             }
         }
 
+        for (BlockBreakingRenderState breaking : breakingStates) {
+            if (breaking.blockState().getRenderShape() != net.minecraft.world.level.block.RenderShape.MODEL) {
+                continue;
+            }
+            matrixStack.setIdentity();
+            matrixStack.translate(breaking.blockPos().getX() - camX,
+                    breaking.blockPos().getY() - camY, breaking.blockPos().getZ() - camZ);
+            if (reusableCmdQueue == null) {
+                reusableCmdQueue = new MetalRenderCommandQueue(metalVertexConsumer, 0x00F000F0);
+            } else {
+                reusableCmdQueue.reset(metalVertexConsumer, 0x00F000F0);
+            }
+            reusableCmdQueue.submitBreakingBlockModel(matrixStack,
+                    mc.getModelManager().getBlockStateModelSet().get(breaking.blockState()),
+                    breaking.blockState().getSeed(breaking.blockPos()), breaking.progress());
+            for (MetalRenderCommandQueue.DrawSegment segment : reusableCmdQueue.getSegments()) {
+                enqueueDraw(segment.startVertex, segment.vertexCount, 0,
+                        segment.glTextureId, segment.renderFlags);
+            }
+        }
         vtxCount = metalVertexConsumer.getVertexCount();
         if (frameCount < 3 && drawn > 0) {
             MetalLogger.info(
@@ -1097,7 +1118,8 @@ public class MetalEntityRenderer {
         metalVertexConsumer.vertex(x3, y3, z3, color, u0, v0, 0, light, nx, ny, nz);
     }
 
-    public void renderCapturedEntities(long ctx, boolean inWater) {
+    public void renderCapturedEntities(long ctx, boolean inWater,
+            java.util.List<BlockBreakingRenderState> breakingStates) {
         if (!active || ctx == 0 || device == 0) {
             return;
         }
@@ -1119,7 +1141,7 @@ public class MetalEntityRenderer {
             lastEntityLogTime = now;
         }
 
-        buildMeshes(ctx);
+        buildMeshes(ctx, breakingStates);
         if (vtxCount == 0 || pendingDrawCount == 0) {
             return;
         }
@@ -1218,7 +1240,7 @@ public class MetalEntityRenderer {
     }
 
     private long getOrCreateMetalTexture(int glTextureId) {
-        if (glTextureId == 0 || device == 0) {
+        if (MetalRenderClient.isBackendMode() || glTextureId == 0 || device == 0) {
             return 0;
         }
         long liveAtlas = getLiveBlockAtlasTexture(glTextureId);

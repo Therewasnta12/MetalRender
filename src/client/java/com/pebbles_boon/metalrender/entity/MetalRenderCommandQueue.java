@@ -26,6 +26,7 @@ import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
+import net.minecraft.client.resources.model.ModelBakery;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.RandomSource;
@@ -493,7 +494,56 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
     @Override
     public void submitBreakingBlockModel(PoseStack matrices,
             BlockStateModel model, long seed,
-            int color) {
+            int progress) {
+        if (matrices == null || model == null || progress < 0 ||
+                progress >= ModelBakery.DESTROY_STAGE_COUNT ||
+                !(vertexConsumer instanceof MetalVertexConsumer mvc)) {
+            return;
+        }
+        AbstractTexture texture = Minecraft.getInstance().getTextureManager()
+                .getTexture(ModelBakery.BREAKING_LOCATIONS.get(progress));
+        if (!(texture.getTexture() instanceof GlTexture gl)) return;
+        java.util.ArrayList<BlockStateModelPart> parts = new java.util.ArrayList<>();
+        model.collectParts(RandomSource.create(seed), parts);
+        int start = mvc.getVertexCount();
+        for (BlockStateModelPart part : parts) {
+            for (Direction face : Direction.values()) {
+                emitBreakingQuads(mvc, matrices, part.getQuads(face));
+            }
+            emitBreakingQuads(mvc, matrices, part.getQuads(null));
+        }
+        int end = mvc.getVertexCount();
+        if (end > start) {
+            DrawSegment segment = new DrawSegment();
+            segment.startVertex = start;
+            segment.vertexCount = end - start;
+            segment.glTextureId = gl.glId();
+            segment.renderFlags = 0x10;
+            segments.add(segment);
+        }
+    }
+
+    private void emitBreakingQuads(MetalVertexConsumer mvc, PoseStack matrices, List<BakedQuad> quads) {
+        for (BakedQuad quad : quads) {
+            Direction face = quad.direction();
+            for (int i = 0; i < 4; i++) {
+                var local = quad.position(i);
+                float u = switch (face) {
+                    case DOWN, UP, SOUTH -> local.x();
+                    case NORTH -> 1 - local.x();
+                    case WEST -> local.z();
+                    case EAST -> 1 - local.z();
+                };
+                float v = switch (face) {
+                    case DOWN -> 1 - local.z();
+                    case UP -> local.z();
+                    default -> 1 - local.y();
+                };
+                Vector3f position = matrices.last().pose().transformPosition(new Vector3f(local));
+                mvc.vertex(position.x, position.y, position.z, 0xFFFFFFFF, u, v, 0,
+                        0x00F000F0, face.getStepX(), face.getStepY(), face.getStepZ());
+            }
+        }
     }
 
     @Override
