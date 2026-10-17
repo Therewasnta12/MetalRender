@@ -79,4 +79,5 @@ tasks.withType(JavaCompile).configureEach {
             include 'metalrender.h', 'metalrender.mm'
             into 'native'
         }
+        from('LICENSE.md')
     }
