@@ -188,6 +188,7 @@ public class CustomChunkMesher {
         public final int lodTier;
         public final byte missingNeighborMask;
         public final int opaqueFormat;
+        public boolean tiered;
 
         public ChunkMeshData(long bufferHandle, int quadCount, int chunkX, int chunkY, int chunkZ,
                 int buildPlayerCX, int buildPlayerCY, int buildPlayerCZ) {
@@ -380,6 +381,55 @@ public class CustomChunkMesher {
 
     private static final boolean COMPRESS_BYTE_ORDER = MetalRenderConfig.getBool("metalrender.compressByteOrder", true);
     private static final boolean VERIFY_COMPRESS = MetalRenderConfig.getBool("metalrender.verifyCompress", false);
+    private static boolean quadTiersWanted() {
+        MetalRenderConfig cfg = MetalRenderClient.getConfig();
+        return MetalRenderConfig.getBool("metalrender.quadTiers", cfg == null || cfg.gpuDrivenTerrain);
+    }
+    private static final boolean QUAD_CENSUS = MetalRenderConfig.getBool("metalrender.quadCensus", false);
+    private static final ThreadLocal<QuadTiers.Section> TIER_SECTION = ThreadLocal.withInitial(QuadTiers.Section::new);
+    private static final java.util.concurrent.atomic.AtomicInteger TIER_VERIFIED = new java.util.concurrent.atomic.AtomicInteger();
+    private static volatile boolean arenaReady;
+
+    public static boolean tiersActive() {
+        return arenaReady && MetalRenderClient.isBackendMode();
+    }
+
+    public static boolean quadCensus() {
+        return QUAD_CENSUS;
+    }
+
+    public static synchronized void configureArena(int renderDistanceChunks) {
+        String path = System.getProperty("metalrender.terrainPath", "auto");
+        if (arenaReady || !quadTiersWanted() || !MetalRenderClient.isBackendMode() || !NativeBridge.isLibLoaded()
+                || "mesh".equals(path) || "vertex".equals(path)) {
+            return;
+        }
+        try {
+            long ramMb = NativeBridge.nGetPhysicalMemory() >> 20;
+            int defaultCap = (int) Math.min(8192L, (ramMb / 4) / 128 * 128);
+            int capMb = Integer.getInteger("metalrender.arenaCapMb", Math.max(512, defaultCap));
+            boolean gpuCull = MetalRenderConfig.getBool("metalrender.gpuCull", true);
+            boolean oracle = MetalRenderConfig.getBool("metalrender.cullOracle", false);
+            arenaReady = NativeBridge.nArenaConfigure(renderDistanceChunks, capMb, gpuCull, oracle);
+            MetalLogger.info("terrain arena %s (cap %d MB, gpuCull=%s, oracle=%s)", arenaReady ? "ready" : "unavailable",
+                    capMb, gpuCull, oracle);
+        } catch (Throwable t) {
+            MetalLogger.warn("terrain arena configure failed: %s", t.toString());
+            arenaReady = false;
+        }
+    }
+
+    public static void setAtlasSprites(java.util.List<net.minecraft.client.renderer.texture.TextureAtlasSprite> sprites) {
+        try {
+            QuadTiers.SpriteTable table = QuadTiers.SpriteTable.fromAtlas(sprites);
+            QuadTiers.setSpriteTable(table);
+            if (NativeBridge.isLibLoaded() && table.count > 0) {
+                NativeBridge.nArenaSetSprites(table.toNative(), table.count);
+            }
+        } catch (Throwable t) {
+            MetalLogger.warn("sprite table build failed: %s", t.toString());
+        }
+    }
     private static final java.util.concurrent.atomic.AtomicInteger COMPRESS_VERIFIED = new java.util.concurrent.atomic.AtomicInteger();
     private static final java.util.concurrent.atomic.AtomicLong COMPRESS_VERIFY_BAD = new java.util.concurrent.atomic.AtomicLong();
 
@@ -856,7 +906,7 @@ public class CustomChunkMesher {
     }
 
     public boolean tryTierSwap(int cx, int cy, int cz, int targetTier) {
-        if (targetTier < 0 || targetTier > 2) {
+        if (targetTier < 0 || targetTier > 2 || tiersActive()) {
             return false;
         }
         long key = packChunkKey(cx, cy, cz);
@@ -1078,7 +1128,9 @@ public class CustomChunkMesher {
         }
         if (old != null) {
             NativeBridge.nUnregisterChunkMesh(cx, cy, cz);
-            NativeBridge.nDestroyBuffer(old.bufferHandle);
+            if (old.bufferHandle != 0) {
+                NativeBridge.nDestroyBuffer(old.bufferHandle);
+            }
             meshCountAtomic.decrementAndGet();
             vertexCountAtomic.addAndGet(-old.quadCount * 4);
             totalQuadCountAcc.addAndGet(-(long) old.quadCount);
@@ -1430,7 +1482,9 @@ public class CustomChunkMesher {
         }
         if (old != null) {
             NativeBridge.nUnregisterChunkMesh(chunkX, chunkY, chunkZ);
-            NativeBridge.nDestroyBuffer(old.bufferHandle);
+            if (old.bufferHandle != 0) {
+                NativeBridge.nDestroyBuffer(old.bufferHandle);
+            }
             meshCountAtomic.decrementAndGet();
             vertexCountAtomic.addAndGet(-old.quadCount * 4);
             totalQuadCountAcc.addAndGet(-(long) old.quadCount);
@@ -2475,8 +2529,21 @@ public class CustomChunkMesher {
             vertexBuffer.flip();
             int[] facingQuadCounts = bucketQuadsByFacing(vertexHolder, opaqueQuadCount, waterQuadCount);
 
+            boolean tiered = false;
+            int tierPayloadBytes = 0;
+            QuadTiers.Section tierSection = null;
+            if (tiersActive()) {
+                tiered = true;
+                if (opaqueQuadCount > 0) {
+                    tierSection = TIER_SECTION.get();
+                    boolean verify = VERIFY_COMPRESS && TIER_VERIFIED.getAndIncrement() < 256;
+                    QuadTiers.build(tierSection, vertexHolder.buf, facingQuadCounts, opaqueQuadCount, true, verify);
+                    tierPayloadBytes = tierSection.quadBytes;
+                }
+            }
+
             int opaqueFormat = VERTEX_FORMAT_UNCOMPRESSED;
-            int opaqueBytes = opaqueBytesUncompressed;
+            int opaqueBytes = tiered ? 0 : opaqueBytesUncompressed;
             ByteBuffer compressedOpaque = null;
             boolean meshShadersOn = false;
             try {
@@ -2484,7 +2551,7 @@ public class CustomChunkMesher {
             } catch (Throwable ignored) {
                 meshShadersOn = false;
             }
-            if (meshShadersOn && opaqueQuadCount > 0) {
+            if (!tiered && meshShadersOn && opaqueQuadCount > 0) {
                 COMPRESS_ATTEMPTS.incrementAndGet();
                 try {
                     ByteBuffer srcDup = vertexHolder.buf.duplicate();
@@ -2547,7 +2614,7 @@ public class CustomChunkMesher {
                 return;
             }
 
-            int roundedSize = roundToSizeClass(dataLen);
+            int roundedSize = dataLen > 0 ? roundToSizeClass(dataLen) : 0;
             long oldHintHandle = 0;
             synchronized (meshCache) {
                 ChunkMeshData existing = meshCache.get(key);
@@ -2556,17 +2623,22 @@ public class CustomChunkMesher {
                 }
             }
 
-            long bufferHandle;
-            UPLOAD_SEMAPHORE.acquireUninterruptibly();
-            try {
-                bufferHandle = NativeBridge.nCreateBufferWithHint(
-                        deviceHandle, roundedSize, NativeMemory.STORAGE_MODE_SHARED, oldHintHandle);
-                long uploadStart = System.nanoTime();
-                NativeBridge.nUploadBufferDataDirect(bufferHandle, vertexBuffer, 0, dataLen);
-                MetalRenderProfiler.getInstance().recordUploadTime(System.nanoTime() - uploadStart);
-                MetalRenderProfiler.getInstance().incrementUploadsDone(1);
-            } finally {
-                UPLOAD_SEMAPHORE.release();
+            long bufferHandle = 0;
+            if (dataLen > 0) {
+                UPLOAD_SEMAPHORE.acquireUninterruptibly();
+                try {
+                    bufferHandle = NativeBridge.nCreateBufferWithHint(
+                            deviceHandle, roundedSize, NativeMemory.STORAGE_MODE_SHARED, oldHintHandle);
+                    long uploadStart = System.nanoTime();
+                    NativeBridge.nUploadBufferDataDirect(bufferHandle, vertexBuffer, 0, dataLen);
+                    MetalRenderProfiler.getInstance().recordUploadTime(System.nanoTime() - uploadStart);
+                    MetalRenderProfiler.getInstance().incrementUploadsDone(1);
+                } finally {
+                    UPLOAD_SEMAPHORE.release();
+                }
+            }
+            if (tiered) {
+                roundedSize += tierPayloadBytes;
             }
 
             ChunkMeshData mesh = new ChunkMeshData(bufferHandle, quadCount, chunkX, chunkY, chunkZ,
@@ -2574,11 +2646,23 @@ public class CustomChunkMesher {
                     visibilityMask, facingQuadCounts, lodTier,
                     computeMissingNeighborMask(context.world, chunkX, chunkZ),
                     opaqueFormat);
+            mesh.tiered = tiered;
             ChunkMeshData old;
             synchronized (dirtyGeneration) {
                 if (isTaskCancelled(key, generation, globalGeneration) || outsideBuildRange(chunkX, chunkZ)) {
-                    NativeBridge.nDestroyBuffer(bufferHandle);
+                    if (bufferHandle != 0) {
+                        NativeBridge.nDestroyBuffer(bufferHandle);
+                    }
                     return;
+                }
+                if (tiered) {
+                    boolean published = tierSection != null
+                            ? NativeBridge.nArenaPublish(chunkX, chunkY, chunkZ, lodTier, tierSection.quads,
+                                    tierSection.quadBytes, tierSection.units, tierSection.unitCount, opaqueQuadCount)
+                            : NativeBridge.nArenaPublish(chunkX, chunkY, chunkZ, lodTier, null, 0, null, 0, 0);
+                    if (!published) {
+                        MetalLogger.error("terrain arena publish failed [%d,%d,%d]", chunkX, chunkY, chunkZ);
+                    }
                 }
                 synchronized (meshCache) {
                     old = meshCache.put(key, mesh);
@@ -2601,21 +2685,22 @@ public class CustomChunkMesher {
             synchronized (dirtyGeneration) {
                 synchronized (batchRegData) {
                     int idx = batchRegCount * BATCH_REG_STRIDE;
+                    int[] regFacing = tiered ? new int[7] : facingQuadCounts;
                     batchRegData[idx] = (chunkX & 0xFFFFFFFFL) | ((long) chunkY << 32);
-                    batchRegData[idx + 1] = (chunkZ & 0xFFFFFFFFL) | ((long) quadCount << 32);
+                    batchRegData[idx + 1] = (chunkZ & 0xFFFFFFFFL) | ((long) (tiered ? waterQuadCount : quadCount) << 32);
                     batchRegData[idx + 2] = bufferHandle;
                     batchRegData[idx + 3] = visibilityMask;
-                    batchRegData[idx + 4] = (opaqueQuadCount & 0xFFFFFFFFL)
-                            | ((long) (facingQuadCounts.length > 0 ? facingQuadCounts[0] : 0) << 32);
+                    batchRegData[idx + 4] = ((tiered ? 0 : opaqueQuadCount) & 0xFFFFFFFFL)
+                            | ((long) (regFacing.length > 0 ? regFacing[0] : 0) << 32);
                     batchRegData[idx
-                            + 5] = ((long) (facingQuadCounts.length > 1 ? facingQuadCounts[1] : 0) & 0xFFFFFFFFL)
-                                    | ((long) (facingQuadCounts.length > 2 ? facingQuadCounts[2] : 0) << 32);
+                            + 5] = ((long) (regFacing.length > 1 ? regFacing[1] : 0) & 0xFFFFFFFFL)
+                                    | ((long) (regFacing.length > 2 ? regFacing[2] : 0) << 32);
                     batchRegData[idx
-                            + 6] = ((long) (facingQuadCounts.length > 3 ? facingQuadCounts[3] : 0) & 0xFFFFFFFFL)
-                                    | ((long) (facingQuadCounts.length > 4 ? facingQuadCounts[4] : 0) << 32);
+                            + 6] = ((long) (regFacing.length > 3 ? regFacing[3] : 0) & 0xFFFFFFFFL)
+                                    | ((long) (regFacing.length > 4 ? regFacing[4] : 0) << 32);
                     batchRegData[idx
-                            + 7] = ((long) (facingQuadCounts.length > 5 ? facingQuadCounts[5] : 0) & 0xFFFFFFFFL)
-                                    | ((long) (facingQuadCounts.length > 6 ? facingQuadCounts[6] : 0) << 32);
+                            + 7] = ((long) (regFacing.length > 5 ? regFacing[5] : 0) & 0xFFFFFFFFL)
+                                    | ((long) (regFacing.length > 6 ? regFacing[6] : 0) << 32);
                     batchRegData[idx + 8] = (lodTier & 0xFF) | ((long) (opaqueFormat & 0xFF) << 16);
                     batchRegCount++;
                     if (batchRegCount >= BATCH_REG_CAPACITY) {
@@ -2632,13 +2717,14 @@ public class CustomChunkMesher {
                 long oldEpoch = meshEpochByKey.get(key);
                 meshEpochByKey.put(key, contentEpochAtSubmit);
                 if (old != null && old.bufferHandle != bufferHandle
-                        && old.lodTier != mesh.lodTier && oldEpoch == contentEpochAtSubmit) {
+                        && old.lodTier != mesh.lodTier && oldEpoch == contentEpochAtSubmit
+                        && !tiered && !old.tiered && old.bufferHandle != 0) {
                     stashedOld = true;
                 }
             }
             if (stashedOld) {
                 stashVariant(key, old, contentEpochAtSubmit);
-            } else if (old != null && old.bufferHandle != bufferHandle) {
+            } else if (old != null && old.bufferHandle != 0 && old.bufferHandle != bufferHandle) {
                 NativeBridge.nDestroyBuffer(old.bufferHandle);
             }
 
@@ -4499,7 +4585,7 @@ public class CustomChunkMesher {
     }
 
     public void queueDrawRegistration(ChunkMeshData mesh) {
-        if (mesh == null || mesh.bufferHandle == 0 || mesh.quadCount <= 0) {
+        if (mesh == null || mesh.bufferHandle == 0 || mesh.quadCount <= 0 || mesh.tiered) {
             return;
         }
         int opaqueQuadCount = 0;
