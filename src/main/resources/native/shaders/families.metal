@@ -816,7 +816,11 @@ vertex WOut entity_vertex(VIn in [[stage_in]],
                           sampler lightmapSampler [[sampler(2), function_constant(ENTITY_VS_LIGHTMAP)]]) {
   WOut o = mr_wout();
   float3 p = mr_position(in);
-  float4 glPosition = mr_mat4(proj.ProjMat) * mr_mat4(dt.ModelViewMat) * float4(p, 1.0);
+  float4 viewPosition = mr_mat4(dt.ModelViewMat) * float4(p, 1.0);
+  if (VS_VARIANT == MR_VS_ENTITY_SHADOW) {
+    viewPosition.xyz *= 0.999;
+  }
+  float4 glPosition = mr_mat4(proj.ProjMat) * viewPosition;
   o.position = mr_clip(glPosition);
   o.sphericalDistance = mr_fog_spherical(p);
   o.cylindricalDistance = mr_fog_cylindrical(p);
