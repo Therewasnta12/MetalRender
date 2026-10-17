@@ -7509,6 +7509,7 @@ static id<MTLBuffer> g_arenaUnitBuf = nil;
 static id<MTLBuffer> g_arenaSprites = nil;
 static id<MTLBuffer> g_arenaLists[2] = {nil, nil};
 static id<MTLBuffer> g_arenaArgs[2] = {nil, nil};
+static id<MTLBuffer> g_arenaQuadIdx = nil;
 static id<MTLBuffer> g_arenaStats[2] = {nil, nil};
 static uint32_t g_arenaListCap = 0;
 static ArenaRangeAlloc g_arenaKiB;
@@ -7564,7 +7565,7 @@ static bool mr_arena_alloc_buffers_locked() {
   g_arenaListCap = std::min<uint32_t>(unitCap, 524288u);
   for (int i = 0; i < 2; i++) {
     g_arenaLists[i] = [g_device newBufferWithLength:(NSUInteger)g_arenaListCap * 64 options:MTLResourceStorageModeShared];
-    g_arenaArgs[i] = [g_device newBufferWithLength:128 options:MTLResourceStorageModeShared];
+    g_arenaArgs[i] = [g_device newBufferWithLength:256 options:MTLResourceStorageModeShared];
     g_arenaStats[i] = [g_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
   }
   if (!g_arenaBuf || !g_arenaSecBuf || !g_arenaUnitBuf || !g_arenaLists[0] || !g_arenaLists[1] || !g_arenaArgs[0] ||
@@ -7748,8 +7749,17 @@ static bool mr_arena_ensure_pipelines() {
     return true;
   if (!g_shaderLibrary || !g_device)
     return false;
+  if (!g_arenaQuadIdx) {
+    uint16_t idx[192];
+    for (int q = 0; q < 32; q++) {
+      static const int corner[6] = {0, 1, 2, 2, 3, 0};
+      for (int k = 0; k < 6; k++)
+        idx[q * 6 + k] = (uint16_t)(q * 4 + corner[k]);
+    }
+    g_arenaQuadIdx = [g_device newBufferWithBytes:idx length:sizeof(idx) options:MTLResourceStorageModeShared];
+  }
   id<MTLFunction> vs = [g_shaderLibrary newFunctionWithName:@"terrain_vs"];
-  id<MTLFunction> fs = [g_shaderLibrary newFunctionWithName:@"fragment_terrain_opaque"];
+  id<MTLFunction> fs = [g_shaderLibrary newFunctionWithName:@"fragment_arena_cutout"];
   if (!vs || !fs) {
     dbg("arena: terrain_vs or fragment missing\n");
     return false;
@@ -7768,7 +7778,7 @@ static bool mr_arena_ensure_pipelines() {
     dbg("arena: pipeline failed: %s\n", error ? [[error localizedDescription] UTF8String] : "unknown");
     return false;
   }
-  id<MTLFunction> fsSolid = [g_shaderLibrary newFunctionWithName:@"fragment_terrain_solid"];
+  id<MTLFunction> fsSolid = [g_shaderLibrary newFunctionWithName:@"fragment_arena_solid"];
   if (!fsSolid)
     return false;
   MTLRenderPipelineDescriptor *solidDesc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -8077,10 +8087,11 @@ static void mr_arena_cpu_cull(const ArenaCullFrame &f, const ArenaSectionRecord 
   if (args) {
     static const uint32_t classVerts[4] = {24, 48, 96, 192};
     for (int li = 0; li < 8; li++) {
-      args[li * 4 + 0] = classVerts[li & 3];
-      args[li * 4 + 1] = std::min(counts[li], f.listCapacity);
-      args[li * 4 + 2] = 0;
-      args[li * 4 + 3] = 0;
+      args[li * 5 + 0] = classVerts[li & 3];
+      args[li * 5 + 1] = std::min(counts[li], f.listCapacity);
+      args[li * 5 + 2] = 0;
+      args[li * 5 + 3] = 0;
+      args[li * 5 + 4] = 0;
     }
   }
   quadsOut = quads;
@@ -8177,10 +8188,11 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nTerrainPrepare(JNI
       uint32_t *a = (uint32_t *)[argsBuf contents];
       static const uint32_t classVerts[4] = {24, 48, 96, 192};
       for (int li = 0; li < 8; li++) {
-        a[li * 4 + 0] = classVerts[li & 3];
-        a[li * 4 + 1] = 0;
-        a[li * 4 + 2] = 0;
-        a[li * 4 + 3] = 0;
+        a[li * 5 + 0] = classVerts[li & 3];
+        a[li * 5 + 1] = 0;
+        a[li * 5 + 2] = 0;
+        a[li * 5 + 3] = 0;
+        a[li * 5 + 4] = 0;
       }
       g_arenaDrawnQuads.store(0, std::memory_order_relaxed);
     }
@@ -8219,9 +8231,12 @@ static void mr_arena_encode(id<MTLRenderCommandEncoder> enc) {
   for (int li = 0; li < 8; li++) {
     [enc setRenderPipelineState:mr_ext_pso(li < 4 ? g_pipelineArenaSolid : g_pipelineArena)];
     [enc setVertexBuffer:fb.lists offset:(NSUInteger)li * fb.listCap * 8 atIndex:0];
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle
-              indirectBuffer:g_arenaArgs[slot]
-        indirectBufferOffset:(NSUInteger)li * 16];
+    [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                     indexType:MTLIndexTypeUInt16
+                   indexBuffer:g_arenaQuadIdx
+             indexBufferOffset:0
+                indirectBuffer:g_arenaArgs[slot]
+          indirectBufferOffset:(NSUInteger)li * 20];
     g_drawCallCount++;
   }
 }

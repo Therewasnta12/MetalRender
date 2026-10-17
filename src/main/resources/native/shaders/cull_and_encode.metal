@@ -195,10 +195,11 @@ kernel void terrain_cull_reset(
         return;
     }
     for (uint i = 0u; i < 8u; i++) {
-        atomic_store_explicit(&args[i * 4u + 0u], kTerrClassVerts[i & 3u], memory_order_relaxed);
-        atomic_store_explicit(&args[i * 4u + 1u], 0u, memory_order_relaxed);
-        atomic_store_explicit(&args[i * 4u + 2u], 0u, memory_order_relaxed);
-        atomic_store_explicit(&args[i * 4u + 3u], 0u, memory_order_relaxed);
+        atomic_store_explicit(&args[i * 5u + 0u], kTerrClassVerts[i & 3u], memory_order_relaxed);
+        atomic_store_explicit(&args[i * 5u + 1u], 0u, memory_order_relaxed);
+        atomic_store_explicit(&args[i * 5u + 2u], 0u, memory_order_relaxed);
+        atomic_store_explicit(&args[i * 5u + 3u], 0u, memory_order_relaxed);
+        atomic_store_explicit(&args[i * 5u + 4u], 0u, memory_order_relaxed);
     }
     atomic_store_explicit(&stats[0], 0u, memory_order_relaxed);
     atomic_store_explicit(&stats[1], 0u, memory_order_relaxed);
@@ -250,7 +251,7 @@ kernel void terrain_cull(
         kept += n[i];
         uint b = 0u;
         if (simd_is_first() && total > 0u) {
-            b = atomic_fetch_add_explicit(&args[i * 4u + 1u], total, memory_order_relaxed);
+            b = atomic_fetch_add_explicit(&args[i * 5u + 1u], total, memory_order_relaxed);
         }
         base[i] = simd_broadcast_first(b);
     }
@@ -288,6 +289,6 @@ kernel void terrain_cull_finish(
     if (tid >= 8u) {
         return;
     }
-    uint count = atomic_load_explicit(&args[tid * 4u + 1u], memory_order_relaxed);
-    atomic_store_explicit(&args[tid * 4u + 1u], min(count, f.listCapacity), memory_order_relaxed);
+    uint count = atomic_load_explicit(&args[tid * 5u + 1u], memory_order_relaxed);
+    atomic_store_explicit(&args[tid * 5u + 1u], min(count, f.listCapacity), memory_order_relaxed);
 }
