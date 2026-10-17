@@ -24,6 +24,38 @@ public final class MetalRenderProfiler {
     private static final long LOG_INTERVAL_MS = 5000;
     private static final long SNAPSHOT_INTERVAL_MS = 500;
 
+    private final double[] frameRing = new double[4096];
+    private int frameRingCount;
+    private volatile String scene = "";
+    private final java.util.LinkedHashMap<String, ArrayList<double[]>> sceneRows = new java.util.LinkedHashMap<>();
+    private long lastRssNs;
+    private double cachedRssMb;
+    private String cpuBrand;
+    private boolean firstCsvSample = true;
+    private long previousSwapNs;
+    private double swapMs, swapToSwapMs, limiterMs;
+    private double atlasReadbackMs, atlasDiffMs, atlasUploadMs, vanillaCompileMs;
+    private long previousCullFailsafe;
+    private final SubMs atlasReadbackTimer = new SubMs();
+    private final SubMs atlasDiffTimer = new SubMs();
+    private final SubMs atlasUploadTimer = new SubMs();
+    private final SubMs vanillaCompileTimer = new SubMs();
+
+    private volatile int caveSectionsVisible;
+    private volatile double caveWalkMs;
+    private volatile long caveWalkCount;
+    private volatile long caveWalkReuseCount;
+
+    public void setCaveWorkCounts(long walks, long reuses) {
+        caveWalkCount = walks;
+        caveWalkReuseCount = reuses;
+    }
+
+    public void setCaveVisibility(int count, double millis) {
+        caveSectionsVisible = count;
+        caveWalkMs = millis;
+    }
+
     private boolean visible;
     private long frameStartNs;
     private long renderStartNs;
@@ -96,7 +128,10 @@ public final class MetalRenderProfiler {
             + "pass_opaque_ms,pass_cutout_ms,pass_translucent_ms,pass_hiz_ms,pass_composite_ms,"
             + "mega_pages,mega_used_bytes,mega_allocs,mega_frees,"
             + "compress_attempts,compress_success,compress_rejects,"
-            + "quads_per_column,resident_quad_bytes,drawn_quads,gpu_ms";
+            + "quads_per_column,resident_quad_bytes,drawn_quads,gpu_ms,"
+            + "frames_in_sec,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_max_ms,process_cpu_pct,rss_mb,"
+            + "swap_ms,swap_to_swap_ms,limiter_ms,atlas_readback_ms,atlas_diff_ms,atlas_upload_ms,"
+            + "sections_loaded,sections_beyond_circle,cull_failsafe_frames,vanilla_compile_ms,compress_verify_bad,sections_walk_visible,cave_walk_ms,cave_walks,cave_walk_reuses,scene";
 
     private MetalRenderProfiler() {
     }
@@ -136,6 +171,7 @@ public final class MetalRenderProfiler {
             csvFile = file;
             csvEnabled = true;
             ensureCsvWorker();
+            logRunInfo();
             if (!csvShutdownHookRegistered) {
                 csvShutdownHookRegistered = true;
                 Runtime.getRuntime().addShutdownHook(new Thread(
@@ -157,6 +193,7 @@ public final class MetalRenderProfiler {
 
     public void startFrame() {
         frameStartNs = System.nanoTime();
+        limiterMs = 0;
     }
 
     public void startRender() {
@@ -231,11 +268,12 @@ public final class MetalRenderProfiler {
             chunksDrawnAcc.addAndGet(count);
     }
 
-    public void endFrame() {
+    public synchronized void endFrame() {
         frameEndNs = System.nanoTime();
         totalFrames++;
 
         double frameMs = (frameEndNs - frameStartNs) / 1_000_000.0;
+        if (frameRingCount < frameRing.length) frameRing[frameRingCount++] = frameMs;
         double renderMs = renderEndNs > renderStartNs ? (renderEndNs - renderStartNs) / 1_000_000.0 : 0.0;
         double cpuMs = Math.max(0.0, frameMs - renderMs);
 
@@ -253,6 +291,10 @@ public final class MetalRenderProfiler {
         double lightmapMs = lightmapTimer.drainMs();
         double nativeDrawPrepMs = nativeDrawPrepTimer.drainMs();
         double javaRenderMs = javaRenderTimer.drainMs();
+        atlasReadbackMs = atlasReadbackTimer.drainMs();
+        atlasDiffMs = atlasDiffTimer.drainMs();
+        atlasUploadMs = atlasUploadTimer.drainMs();
+        vanillaCompileMs = vanillaCompileTimer.drainMs();
         double gpuMs = 0.0;
         try {
             gpuMs = NativeBridge.nGetGpuFrameTimeMs();
@@ -305,9 +347,18 @@ public final class MetalRenderProfiler {
         }
 
         MetalWorldRenderer wrForCsv = MetalRenderClient.getWorldRenderer();
-        if (csvEnabled && wrForCsv != null &&
+        boolean vanillaProfile = Boolean.getBoolean("metalrender.profileVanilla") && !MetalRenderClient.isEnabled();
+        if (csvEnabled && (wrForCsv != null || vanillaProfile) &&
                 nowMs - lastCsvEmitMs >= 1000L) {
             lastCsvEmitMs = nowMs;
+            if (firstCsvSample) {
+                firstCsvSample = false;
+                logRunInfo();
+            }
+            if (vanillaProfile) {
+                emitVanillaCsvSample(nowMs, frameMs);
+                return;
+            }
             emitCsvSample(nowMs, frameMs, meshMs, uploadMs, cullMs,
                     scanMs, lodMs, drawPrepMs, atlasMs, lightmapMs,
                     nativeDrawPrepMs, javaRenderMs,
@@ -380,6 +431,22 @@ public final class MetalRenderProfiler {
         double scanOut = scanMs > 0 ? scanMs : access.scanMs;
         double lodOut = lodMs > 0 ? lodMs : access.lodMs;
         double drawPrepOut = drawPrepMs > 0 ? drawPrepMs : access.drawPrepMs;
+        double[] pct = drainFramePercentiles();
+        double cpuPct = processCpuPct();
+        double rss = rssMb();
+        int beyondCircle = 0;
+        var mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc.player != null) {
+            var center = mc.player.chunkPosition();
+            int distance = mc.options.renderDistance().get() + 2;
+            for (var mesh : wr.getChunkMesher().getAllMeshes()) {
+                if (!net.minecraft.server.level.ChunkTrackingView.isInViewDistance(
+                        center.x(), center.z(), distance, mesh.chunkX, mesh.chunkZ)) beyondCircle++;
+            }
+        }
+        long failsafe = Integer.toUnsignedLong((int) nativeDouble(() -> NativeBridge.nGetCullFailsafeFrames()));
+        long failsafeDelta = (failsafe - previousCullFailsafe) & 0xffffffffL;
+        previousCullFailsafe = failsafe;
         StringBuilder sb = new StringBuilder(1024);
         sb.append(tsMs).append(',').append(fmt(frameMs)).append(',').append(fmt(meshMs)).append(',')
                 .append(fmt(uploadMs)).append(',').append(fmt(cullMs)).append(',').append(fmt(scanOut)).append(',')
@@ -406,8 +473,175 @@ public final class MetalRenderProfiler {
                 .append(compressRejects).append('"').append(',')
                 .append(fmt(quadsPerColumn)).append(',').append(residentQuadBytes).append(',').append(drawnQuads)
                 .append(',')
-                .append(fmt(gpuMs)).append('\n');
+                .append(fmt(gpuMs));
+        sb.append(',').append((int) pct[0]);
+        for (int i = 1; i < pct.length; i++) sb.append(',').append(fmt(pct[i]));
+        sb.append(',').append(fmt(cpuPct)).append(',').append(fmt(rss))
+                .append(',').append(fmt(swapMs)).append(',').append(fmt(swapToSwapMs)).append(',').append(fmt(limiterMs))
+                .append(',').append(fmt(atlasReadbackMs)).append(',').append(fmt(atlasDiffMs)).append(',').append(fmt(atlasUploadMs))
+                .append(',').append(access.meshCount).append(',').append(beyondCircle).append(',').append(failsafeDelta)
+                .append(',').append(fmt(vanillaCompileMs)).append(',')
+                .append(com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher.getCompressVerifyBad())
+                .append(',').append(Math.min(caveSectionsVisible, access.meshCount)).append(',').append(fmt(caveWalkMs))
+                .append(',').append(caveWalkCount).append(',').append(caveWalkReuseCount)
+                .append(',').append('"').append(scene).append('"').append('\n');
         csvQueue.offer(sb.toString());
+        if (chunksDrawn > 0) addSceneRow(pct, gpuMs, atlasOut, nativeDrawPrep, meshMs, uploadMs,
+                swapMs, swapToSwapMs, limiterMs, cpuPct, rss, access.meshCount, beyondCircle, failsafeDelta, vanillaCompileMs);
+    }
+
+    public synchronized void setScene(String name) {
+        if (name.equals(scene)) return;
+        if (!scene.isEmpty()) logSceneSummary(scene);
+        scene = name;
+        frameRingCount = 0;
+        lastCsvEmitMs = System.currentTimeMillis();
+    }
+
+    private double[] drainFramePercentiles() {
+        double[] sorted = java.util.Arrays.copyOf(frameRing, frameRingCount);
+        frameRingCount = 0;
+        java.util.Arrays.sort(sorted);
+        int n = sorted.length;
+        if (n == 0) return new double[5];
+        return new double[] {n, sorted[(int) (0.50 * (n - 1))], sorted[(int) (0.95 * (n - 1))],
+                sorted[(int) (0.99 * (n - 1))], sorted[n - 1]};
+    }
+
+    private static double processCpuPct() {
+        var bean = java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        if (bean instanceof com.sun.management.OperatingSystemMXBean process) {
+            return Math.max(0, process.getProcessCpuLoad() * 100.0);
+        }
+        return 0;
+    }
+
+    private double rssMb() {
+        long now = System.nanoTime();
+        if (lastRssNs != 0 && now - lastRssNs < 5_000_000_000L) return cachedRssMb;
+        lastRssNs = now;
+        try {
+            Process process = new ProcessBuilder("ps", "-o", "rss=", "-p",
+                    String.valueOf(ProcessHandle.current().pid())).start();
+            try (var reader = process.inputReader()) {
+                String line = reader.readLine();
+                if (line != null) cachedRssMb = Double.parseDouble(line.trim()) / 1024.0;
+            }
+            process.waitFor();
+        } catch (IOException | NumberFormatException ignored) {
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return cachedRssMb;
+    }
+
+    public void recordSwap(long startNs, long endNs) {
+        swapMs = (endNs - startNs) / 1_000_000.0;
+        swapToSwapMs = previousSwapNs == 0 ? 0 : (startNs - previousSwapNs) / 1_000_000.0;
+        previousSwapNs = startNs;
+    }
+
+    public void recordLimiter(long ns) {
+        limiterMs = ns / 1_000_000.0;
+    }
+
+    public void recordAtlasSplit(long readbackNs, long diffNs, long uploadNs) {
+        atlasReadbackTimer.add(readbackNs);
+        atlasDiffTimer.add(diffNs);
+        atlasUploadTimer.add(uploadNs);
+    }
+
+    public void recordVanillaCompile(long ns) {
+        vanillaCompileTimer.add(ns);
+    }
+
+    private void logRunInfo() {
+        if (cpuBrand == null) {
+            cpuBrand = "unknown";
+            try {
+                Process process = new ProcessBuilder("sysctl", "-n", "machdep.cpu.brand_string").start();
+                try (var reader = process.inputReader()) {
+                    String line = reader.readLine();
+                    if (line != null) cpuBrand = line.trim();
+                }
+                process.waitFor();
+            } catch (IOException ignored) {
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        var mc = net.minecraft.client.Minecraft.getInstance();
+        var config = MetalRenderClient.getConfig();
+        String mode = config != null && !config.enableMetalRendering ? "vanilla" : "metalrender";
+        MetalLogger.info("RUNINFO mode=%s cpu=%s os=%s mc=%s renderDistance=%s vsync=%s fpsLimit=%s window=%s",
+                mode, cpuBrand, System.getProperty("os.version"), net.minecraft.SharedConstants.getCurrentVersion().name(),
+                mc == null || mc.options == null ? "unknown" : mc.options.renderDistance().get(),
+                mc == null || mc.options == null ? "unknown" : mc.options.enableVsync().get(),
+                mc == null || mc.options == null ? "unknown" : mc.options.framerateLimit().get(),
+                mc == null || mc.getWindow() == null ? "unknown" : mc.getWindow().getWidth() + "x" + mc.getWindow().getHeight());
+    }
+
+    private void addSceneRow(double[] pct, double gpu, double atlas, double nativeDrawPrep,
+            double mesh, double upload, double swap, double swapToSwap, double limiter, double cpu, double rss,
+            double sections, double beyond, double failsafe, double vanillaCompile) {
+        if (scene.isEmpty() || scene.equals("done") || pct[0] == 0) return;
+        sceneRows.computeIfAbsent(scene, k -> new ArrayList<>()).add(new double[] {
+                pct[1], pct[2], pct[3], pct[4], gpu, atlas, nativeDrawPrep, mesh, upload,
+                swap, swapToSwap, limiter, cpu, rss, sections, beyond, failsafe, vanillaCompile});
+    }
+
+    private void logSceneSummary(String name) {
+        var rows = sceneRows.remove(name);
+        if (rows == null || rows.isEmpty()) return;
+        double[] values = new double[18];
+        for (int column = 0; column < values.length; column++) {
+            double[] sorted = new double[rows.size()];
+            for (int row = 0; row < rows.size(); row++) sorted[row] = rows.get(row)[column];
+            java.util.Arrays.sort(sorted);
+            values[column] = (sorted[(sorted.length - 1) / 2] + sorted[sorted.length / 2]) / 2.0;
+            if (column == 3 || column == 13 || column == 14 || column == 15) values[column] = sorted[sorted.length - 1];
+            if (column == 12 || column == 16) {
+                double sum = 0;
+                for (double v : sorted) sum += v;
+                values[column] = column == 12 ? sum / sorted.length : sum;
+            }
+        }
+        String[] names = {"frame_p50", "frame_p95", "frame_p99", "frame_max", "gpu", "atlas", "native_draw_prep",
+                "mesh", "upload", "swap", "swap_to_swap", "limiter", "cpu_pct", "rss_max", "sections_loaded",
+                "sections_beyond_circle", "cull_failsafe_frames", "vanilla_compile"};
+        StringBuilder line = new StringBuilder("SUMMARY scene=").append(name).append(" rows=").append(rows.size());
+        for (int i = 0; i < names.length; i++) line.append(' ').append(names[i]).append('=').append(fmt(values[i]));
+        line.append(" fps_typical=").append(fmt(values[0] > 0 ? 1000.0 / values[0] : 0));
+        MetalLogger.info(line.toString());
+    }
+
+    private void emitVanillaCsvSample(long tsMs, double frameMs) {
+        double[] pct = drainFramePercentiles();
+        double cpu = processCpuPct();
+        double rss = rssMb();
+        StringBuilder line = new StringBuilder(1024);
+        for (String column : CSV_HEADER.split(",")) {
+            if (!line.isEmpty()) line.append(',');
+            line.append(switch (column) {
+                case "epoch_ms" -> Long.toString(tsMs);
+                case "frame_ms" -> fmt(frameMs);
+                case "frames_in_sec" -> Integer.toString((int) pct[0]);
+                case "frame_p50_ms" -> fmt(pct[1]);
+                case "frame_p95_ms" -> fmt(pct[2]);
+                case "frame_p99_ms" -> fmt(pct[3]);
+                case "frame_max_ms" -> fmt(pct[4]);
+                case "process_cpu_pct" -> fmt(cpu);
+                case "rss_mb" -> fmt(rss);
+                case "scene" -> "\"" + scene + "\"";
+                case "rebuild_reasons", "compress_rejects" -> "\"\"";
+                case "pass_opaque_ms", "pass_cutout_ms", "pass_translucent_ms", "pass_hiz_ms", "pass_composite_ms" -> "-1";
+                default -> "0";
+            });
+        }
+        csvQueue.offer(line.append('\n').toString());
+        if (net.minecraft.client.Minecraft.getInstance().level != null) {
+            addSceneRow(pct, 0, 0, 0, 0, 0, 0, 0, 0, cpu, rss, 0, 0, 0, 0);
+        }
     }
 
     private interface DoubleNative {
@@ -535,7 +769,8 @@ public final class MetalRenderProfiler {
         return remaining;
     }
 
-    private void shutdownCsvWorker() {
+    private synchronized void shutdownCsvWorker() {
+        logSceneSummary(scene);
         Thread worker = csvWorker;
         if (worker != null) {
             worker.interrupt();

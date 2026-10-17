@@ -15,10 +15,16 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
+import com.pebbles_boon.metalrender.performance.MetalRenderProfiler;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(Minecraft.class)
 public class MinecraftClientMixin {
+    @Unique
+    private static boolean metalrender$qosApplied;
+    @Unique
+    private static final boolean PROFILE_VANILLA = Boolean.getBoolean("metalrender.profileVanilla");
     @Unique
     private boolean metalrender$levelWasLoaded = false;
     @Unique
@@ -81,6 +87,12 @@ public class MinecraftClientMixin {
             return;
         }
         if (MetalRenderClient.isEnabled()) {
+            if (!metalrender$qosApplied && com.pebbles_boon.metalrender.nativebridge.NativeBridge.isLibLoaded()) {
+                metalrender$qosApplied = true;
+                if (com.pebbles_boon.metalrender.config.MetalRenderConfig.getBool("metalrender.qos", true)) {
+                    com.pebbles_boon.metalrender.nativebridge.NativeBridge.nSetThreadQos(0x21);
+                }
+            }
             PerformanceController.startFrame();
             ClientLevel level = ((Minecraft) (Object) this).level;
             metalrender$debugCounter++;
@@ -117,6 +129,8 @@ public class MinecraftClientMixin {
                     wr.prepareMeshes();
                 }
             }
+        } else if (PROFILE_VANILLA) {
+            PerformanceController.startFrame();
         }
     }
 
@@ -127,6 +141,24 @@ public class MinecraftClientMixin {
         }
         if (MetalRenderClient.isEnabled()) {
             PerformanceController.endFrame();
+        } else if (PROFILE_VANILLA) {
+            PerformanceController.endFrame();
         }
+    }
+
+    @Redirect(method = "renderFrame", at = @At(value = "INVOKE",
+            target = "Lcom/mojang/blaze3d/systems/RenderSystem;flipFrame(Lcom/mojang/blaze3d/TracyFrameCapture;)V"))
+    private void metalrender$timeFlip(com.mojang.blaze3d.TracyFrameCapture capture) {
+        long t0 = System.nanoTime();
+        com.mojang.blaze3d.systems.RenderSystem.flipFrame(capture);
+        MetalRenderProfiler.getInstance().recordSwap(t0, System.nanoTime());
+    }
+
+    @Redirect(method = "renderFrame", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/FramerateLimiter;limitDisplayFPS(I)V"))
+    private void metalrender$timeLimiter(int fps) {
+        long t0 = System.nanoTime();
+        net.minecraft.client.FramerateLimiter.limitDisplayFPS(fps);
+        MetalRenderProfiler.getInstance().recordLimiter(System.nanoTime() - t0);
     }
 }

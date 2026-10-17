@@ -32,6 +32,15 @@ public final class MetalRenderCommands {
                                 return 1;
                             }))
 
+                            .then(literal("mark").then(com.mojang.brigadier.builder.RequiredArgumentBuilder
+                                    .<FabricClientCommandSource, String>argument("name", com.mojang.brigadier.arguments.StringArgumentType.word())
+                                    .executes(ctx -> {
+                                        String name = com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "name");
+                                        com.pebbles_boon.metalrender.performance.MetalRenderProfiler.getInstance().setScene(name);
+                                        msg(ctx.getSource(), "scene = " + name);
+                                        return 1;
+                                    })))
+
                             .then(literal("cache")
                                     .then(literal("clear").executes(ctx -> {
                                         cacheClear(ctx.getSource());
@@ -128,6 +137,7 @@ public final class MetalRenderCommands {
         msg(src, "§e/metalrender config open §7- Open MetalRender settings scween");
         msg(src, "§e/metalrender config save|reload|reset §7- Config management");
         msg(src, "§e/metalrender performance reset §7- reset perf settings");
+        msg(src, "§e/metalrender mark <name> §7- Mark a profiling scene");
         msg(src, "§e/metalrender profile §7- Toggle profiler overlay");
     }
 
