@@ -30,6 +30,7 @@ public class MetalRenderClient implements ClientModInitializer {
     private static boolean debugEntryStatusSet;
     private static final Object toggleLock = new Object();
     private static volatile boolean syncing;
+    private static volatile boolean backendMode;
 
     @Override
     public void onInitializeClient() {
@@ -289,6 +290,14 @@ public class MetalRenderClient implements ClientModInitializer {
                 worldRenderer = null;
             }
         }
+    }
+
+    public static boolean isBackendMode() {
+        return backendMode;
+    }
+
+    public static void setBackendMode(boolean enabled) {
+        backendMode = enabled;
     }
 
     public static MetalRenderer getRenderer() {
