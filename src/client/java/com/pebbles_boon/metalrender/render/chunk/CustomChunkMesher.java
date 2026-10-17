@@ -2760,6 +2760,7 @@ public class CustomChunkMesher {
         private final MeshBuildContext context;
         private final int chunkX, chunkY, chunkZ;
         private final int lodTier;
+        private boolean detailOverride;
         private final boolean smoothLightingEnabled;
 
         int opaqueQuadCount = 0;
@@ -3501,7 +3502,6 @@ public class CustomChunkMesher {
         private void renderBlockModel(BlockStateModel model, BlockState state, BlockPos pos,
                 int lx, int ly, int lz, RandomSource random) {
 
-            boolean skipDetailQuads = lodTier >= 2;
             boolean blockEmitsLight;
             try {
                 blockEmitsLight = state.getLightEmission() != 0;
@@ -3517,6 +3517,7 @@ public class CustomChunkMesher {
             } else {
                 crossLike = isCrossLike(state, model, random, pos, lx, ly, lz);
             }
+            boolean skipDetailQuads = lodTier >= 2 && (state.isSolidRender() || crossLike);
             try {
                 random.setSeed(state.getSeed(pos));
                 java.util.ArrayList<BlockStateModelPart> parts = PARTS_POOL.get();
@@ -3918,6 +3919,8 @@ public class CustomChunkMesher {
 
         private void emitBakedQuad(BakedQuad quad, int lx, int ly, int lz,
                 BlockState state, boolean water, boolean forceFlat, boolean crossLike) {
+            boolean keepDetail = !water && !crossLike && !state.isSolidRender();
+            detailOverride = keepDetail;
             GrowableStagingBuffer target = water ? waterBuffer : solidBuffer;
             Direction face = quad.direction();
             byte normalIndex = (byte) (face != null ? face.get3DDataValue() : 6);
@@ -3945,7 +3948,7 @@ public class CustomChunkMesher {
             byte tintG = (byte) ((blockColor >> 8) & 0xFF);
             byte tintB = (byte) (blockColor & 0xFF);
 
-            boolean smoothAO = !forceFlat && lodTier == 0 && face != null && smoothLightingEnabled;
+            boolean smoothAO = !forceFlat && (lodTier == 0 || keepDetail) && face != null && smoothLightingEnabled;
             boolean faceCubic = false;
             if (smoothAO) {
                 float minX = 32f, minY = 32f, minZ = 32f;
@@ -3991,7 +3994,7 @@ public class CustomChunkMesher {
 
                 byte light;
                 float ao;
-                if (lodTier >= 2) {
+                if (lodTier >= 2 && !keepDetail) {
                     light = computeFaceLightFast(lx, ly, lz, face, quad.materialInfo().lightEmission());
                     ao = 1.0f;
                 } else {
@@ -4059,7 +4062,7 @@ public class CustomChunkMesher {
 
         private void computeVertexLighting(int lx, int ly, int lz, Direction face,
                 boolean faceCubic, float vx, float vy, float vz, int emission, boolean flatLight) {
-            if (!flatLight && lodTier == 0 && face != null && smoothLightingEnabled) {
+            if (!flatLight && (lodTier == 0 || detailOverride) && face != null && smoothLightingEnabled) {
                 computeSmoothLightAndAO(lx, ly, lz, face, faceCubic, vx, vy, vz, emission);
                 return;
             }

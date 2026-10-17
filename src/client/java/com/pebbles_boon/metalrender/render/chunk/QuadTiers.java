@@ -11,6 +11,7 @@ public final class QuadTiers {
     public static final int UNIT_BYTES = 16;
     public static final int SECTION_BYTES = 32;
     public static final int MAX_UNIT_QUADS = 32;
+    public static final int MAX_UNIT_SPAN = 8;
     public static final int TIER_A = 0;
     public static final int TIER_B = 1;
     public static final int TIER_C = 2;
@@ -930,6 +931,18 @@ public final class QuadTiers {
                 int idx = (int) (s.keys[j] & 0xFFFFFF);
                 if (s.qBucket[idx] != unitBucket || s.qTier[idx] != unitTier || s.qLayer[idx] != unitLayer) {
                     break;
+                }
+                int nb = s.boxes[idx];
+                if (count > 0) {
+                    int nx0 = Math.min(bx0, nb & 31);
+                    int ny0 = Math.min(by0, (nb >> 5) & 31);
+                    int nz0 = Math.min(bz0, (nb >> 10) & 31);
+                    int nx1 = Math.max(bx1, (nb >> 15) & 31);
+                    int ny1 = Math.max(by1, (nb >> 20) & 31);
+                    int nz1 = Math.max(bz1, (nb >> 25) & 31);
+                    if (nx1 - nx0 > MAX_UNIT_SPAN || ny1 - ny0 > MAX_UNIT_SPAN || nz1 - nz0 > MAX_UNIT_SPAN) {
+                        break;
+                    }
                 }
                 ByteBuffer tmp = s.tmp[unitTier];
                 int srcOff = s.qSeq[idx] * stride;
