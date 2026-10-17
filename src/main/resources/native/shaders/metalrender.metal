@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include "terrain_decode.h"
 using namespace metal;
 
 struct ChunkVertex {
@@ -287,6 +288,57 @@ vertex SimpleVertexOut vertex_terrain_inhouse(
     return out;
 }
 
+
+struct TerrainFrame {
+    int4   camBlock;
+    float4 camFrac;
+};
+
+vertex SimpleVertexOut terrain_vs(
+    uint vid [[vertex_id]],
+    uint iid [[instance_id]],
+    device const uint2* list [[buffer(0)]],
+    constant float4x4& projectionMatrix [[buffer(1)]],
+    constant float4x4& modelViewMatrix [[buffer(2)]],
+    constant float4& cameraPosition [[buffer(3)]],
+    constant TerrainFrame& frame [[buffer(4)]],
+    device const uint* arena [[buffer(5)]],
+    device const UnitRecord* units [[buffer(6)]],
+    device const SectionRecord* sections [[buffer(7)]],
+    device const uint2* sprites [[buffer(8)]]
+) {
+    SimpleVertexOut out;
+    out.position = float4(0.0, 0.0, 2.0, 1.0);
+    out.texCoord = float2(0.0);
+    out.color    = half4(0.0h);
+    out.lightUV  = float2(0.0f);
+    out.light    = 0.0h;
+    out.normalIndex = 7;
+    out.fogSphCyl = float2(0.0f, 0.0f);
+    uint quad = vid / 6u;
+    uint corner = kTerrCornerOfIndex[vid % 6u];
+    uint2 entry = list[iid];
+    UnitRecord unit = units[entry.x];
+    if (quad >= (unit.meta & 31u) + 1u) {
+        return out;
+    }
+    SectionRecord section = sections[entry.y];
+    uint tier = (unit.meta >> 8) & 3u;
+    TerrainCorner c = terr_decode(arena, sprites, tier, unit.firstQuad, quad, corner);
+    float3 rel = float3(float(section.x - frame.camBlock.x), float(section.y - frame.camBlock.y),
+                        float(section.z - frame.camBlock.z)) - frame.camFrac.xyz;
+    float3 worldPos = c.pos + rel;
+    float4 viewPos = modelViewMatrix * float4(worldPos, 1.0);
+    out.position = projectionMatrix * viewPos;
+    out.texCoord = c.uv;
+    out.color    = half4(half3(c.rgb), half(c.alpha));
+    out.lightUV = decodePackedLight(c.light);
+    out.light = half(max(max(out.lightUV.x, out.lightUV.y * cameraPosition.w), 0.15f));
+    out.normalIndex = (unit.meta >> 5) & 7u;
+    out.fogSphCyl = float2(length(worldPos), max(length(worldPos.xz), abs(worldPos.y)));
+    return out;
+}
+
 struct TerrainFragArgs {
     texture2d<half> blockAtlas [[id(0)]];
     texture2d<half> lightmap   [[id(1)]];
@@ -316,6 +368,23 @@ fragment half4 fragment_terrain_opaque(
     tinted.rgb *= max(light, half3(0.04h));
     tinted.rgb = vanilla_apply_fog(tinted.rgb, in.fogSphCyl, fog);
     return half4(tinted.rgb, half(1.0h));
+}
+
+fragment half4 fragment_terrain_solid(
+    SimpleVertexOut in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogUniforms& fog [[buffer(6)]]
+) {
+    constexpr sampler lightSampler(mag_filter::linear, min_filter::linear,
+                                   mip_filter::nearest, address::clamp_to_edge);
+    constexpr sampler atlasSampler(mag_filter::nearest, min_filter::linear,
+                                   mip_filter::linear, max_anisotropy(1));
+    half3 rgb = blockAtlas.sample(atlasSampler, in.texCoord).rgb * in.color.rgb;
+    half3 light = lightmap.sample(lightSampler, in.lightUV).rgb;
+    rgb *= max(light, half3(0.04h));
+    rgb = vanilla_apply_fog(rgb, in.fogSphCyl, fog);
+    return half4(rgb, half(1.0h));
 }
 
 fragment half4 fragment_terrain_icb_opaque(

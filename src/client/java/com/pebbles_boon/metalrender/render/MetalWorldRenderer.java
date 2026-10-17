@@ -387,6 +387,10 @@ public class MetalWorldRenderer {
         MetalRenderer renderer = MetalRenderClient.getRenderer();
         long device = renderer != null ? renderer.getBackend().getDeviceHandle() : 0;
         this.textureManager = new MetalTextureManager(device);
+        try {
+            CustomChunkMesher.configureArena(Minecraft.getInstance().options.renderDistance().get());
+        } catch (RuntimeException ignored) {
+        }
         this.ioSurfaceBlitter = MetalRenderClient.isBackendMode() ? null : new IOSurfaceBlitter();
         this.projectionMatrix = new Matrix4f();
         this.modelViewMatrix = new Matrix4f();
@@ -892,6 +896,9 @@ public class MetalWorldRenderer {
                 long ibHandle = chunkMesher.getGlobalIndexBuffer();
                 if (external) {
                     externalIndexBuffer = ibHandle;
+                    if (CustomChunkMesher.tiersActive()) {
+                        NativeBridge.nTerrainPrepare();
+                    }
                 } else if (ibHandle != 0) {
                     long drawPrepStart = System.nanoTime();
                     int drawn = NativeBridge.nDrawAllVisibleChunks(frameCtx, ibHandle);
