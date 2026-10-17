@@ -65,6 +65,7 @@ static std::atomic<bool> g_pacedAllowed{true};
 static std::atomic<bool> g_vsyncOn{false};
 static std::atomic<uint64_t> g_nextRefreshNs{0};
 static std::atomic<uint64_t> g_refreshPeriodNs{0};
+static std::atomic<uint64_t> g_linkTick{0};
 static std::atomic<uint64_t> g_gpuLatencyNs{0};
 static CVDisplayLinkRef g_displayLink = nullptr;
 std::atomic<uint64_t> g_backendFrameInProgress{1};
@@ -111,6 +112,7 @@ struct MRContext {
   id<MTLTexture> renderDepth = nil;
   uint64_t lastPresentNs = 0;
   double avgFrameIntervalNs = 0.0;
+  uint64_t lastPresentTick = 0;
   uint64_t lastPresentCallNs = 0;
   uint64_t lastDrawableWaitNs = 0;
   int targetWidth = 0;
@@ -303,6 +305,7 @@ static CVReturn mr_display_link_callback(CVDisplayLinkRef, const CVTimeStamp *, 
                                          CVOptionFlags, CVOptionFlags *, void *) {
   double nsPerTick = mr_timebase_ns_per_tick();
   g_nextRefreshNs.store((uint64_t)((double)outputTime->hostTime * nsPerTick));
+  g_linkTick.fetch_add(1);
   if (outputTime->videoTimeScale > 0)
     g_refreshPeriodNs.store((uint64_t)(1e9 * (double)outputTime->videoRefreshPeriod /
                                        (double)outputTime->videoTimeScale));
@@ -1089,7 +1092,12 @@ static bool mr_should_present(MRContext *ctx) {
     return true;
   if (ctx->lastPresentNs && now - ctx->lastPresentNs > period * 2)
     return true;
-  return ctx->lastPresentNs == 0 || now - ctx->lastPresentNs >= (uint64_t)((double)period * 0.85);
+  uint64_t tick = g_linkTick.load();
+  if (ctx->lastPresentNs == 0 || tick != ctx->lastPresentTick) {
+    ctx->lastPresentTick = tick;
+    return true;
+  }
+  return false;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxPresent)(JNIEnv *, jclass, jlong handle, jlong layerHandle,
@@ -1107,6 +1115,9 @@ extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxPresent)(JNIEnv *, jclass, jlon
       g_backendSkippedPresents.fetch_add(1);
       return JNI_TRUE;
     }
+    bool wantSync = g_vsyncOn.load() || g_pacedAllowed.load();
+    if (layer.displaySyncEnabled != (wantSync ? YES : NO))
+      layer.displaySyncEnabled = wantSync ? YES : NO;
     uint64_t waitStart = mr_now_ns();
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     ctx->lastDrawableWaitNs = mr_now_ns() - waitStart;
