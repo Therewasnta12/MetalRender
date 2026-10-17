@@ -1,11 +1,17 @@
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <CoreVideo/CoreVideo.h>
 #include <atomic>
 #include <jni.h>
+#include <mach/mach_time.h>
+#include <mutex>
 #include <string>
+#include <sys/event.h>
 #include <time.h>
+#include <unistd.h>
 #include <unordered_map>
+#include <vector>
 
 #include "shaders/families_layout.h"
 
@@ -46,6 +52,38 @@ static void mr_query_release(MRQuery *q) {
     delete q;
 }
 
+static const int MR_PASS_CATEGORIES = 5;
+static const int MR_SAMPLE_SLOTS = 3;
+static const int MR_SAMPLES_PER_SLOT = 64;
+
+std::atomic<float> g_backendPassMs[MR_PASS_CATEGORIES];
+std::atomic<float> g_backendGpuMs{0.0f};
+std::atomic<int> g_backendEncoders{0};
+std::atomic<uint64_t> g_backendPresents{0};
+std::atomic<uint64_t> g_backendSkippedPresents{0};
+static std::atomic<bool> g_pacedAllowed{true};
+static std::atomic<bool> g_vsyncOn{false};
+static std::atomic<uint64_t> g_nextRefreshNs{0};
+static std::atomic<uint64_t> g_refreshPeriodNs{0};
+static std::atomic<uint64_t> g_gpuLatencyNs{0};
+static CVDisplayLinkRef g_displayLink = nullptr;
+std::atomic<uint64_t> g_backendFrameInProgress{1};
+std::atomic<uint64_t> g_backendCompletedFrame{0};
+struct MRContext;
+static MRContext *g_backendCtx = nullptr;
+
+struct MRSampleRange {
+  int slot = 0;
+  int first = 0;
+  int count = 0;
+  uint8_t cats[MR_SAMPLES_PER_SLOT / 2];
+};
+
+struct MRFrameAcc {
+  double ms[MR_PASS_CATEGORIES] = {0, 0, 0, 0, 0};
+  int encoders = 0;
+};
+
 struct MRContext {
   id<MTLDevice> device = nil;
   id<MTLCommandQueue> queue = nil;
@@ -54,8 +92,27 @@ struct MRContext {
   id<MTLCommandBuffer> cmd = nil;
   id<MTLRenderCommandEncoder> render = nil;
   id<MTLBlitCommandEncoder> blit = nil;
-  dispatch_semaphore_t frameSemaphore = nullptr;
   uint64_t openSerial = 1;
+  uint64_t frameSerials[2] = {0, 0};
+  bool frameWaitPending = false;
+  bool timestampsEnabled = false;
+  id<MTLCounterSampleBuffer> sampleBuffers[MR_SAMPLE_SLOTS] = {nil, nil, nil};
+  int sampleSlot = 0;
+  int sampleCursor = 0;
+  uint8_t sampleCats[MR_SAMPLES_PER_SLOT / 2];
+  int sampleEncoders = 0;
+  bool cmdHasSamples = false;
+  uint64_t timeBaseCpu = 0;
+  uint64_t timeBaseGpu = 0;
+  std::mutex accMutex;
+  MRFrameAcc frameAcc;
+  int frameEncoders = 0;
+  id<MTLTexture> deadDepth = nil;
+  id<MTLTexture> renderDepth = nil;
+  uint64_t lastPresentNs = 0;
+  double avgFrameIntervalNs = 0.0;
+  uint64_t lastPresentCallNs = 0;
+  uint64_t lastDrawableWaitNs = 0;
   int targetWidth = 0;
   int targetHeight = 0;
   MTLPixelFormat colorFormat = MTLPixelFormatInvalid;
@@ -66,8 +123,30 @@ struct MRContext {
   id<MTLDepthStencilState> clearDepthKeep = nil;
 };
 
+static uint64_t mr_now_ns();
+
+static void mr_frame_wait(MRContext *ctx) {
+  if (!ctx->frameWaitPending)
+    return;
+  ctx->frameWaitPending = false;
+  uint64_t target = ctx->frameSerials[0];
+  if (target) {
+    int tries = 0;
+    while (ctx->event.signaledValue < target && tries < 10) {
+      [ctx->event waitUntilSignaledValue:target timeoutMS:1000];
+      tries++;
+    }
+  }
+}
+
+void mr_backend_wait_frame() {
+  if (g_backendCtx)
+    mr_frame_wait(g_backendCtx);
+}
+
 static id<MTLCommandBuffer> mr_cmd(MRContext *ctx) {
   if (!ctx->cmd) {
+    mr_frame_wait(ctx);
     ctx->cmd = [[ctx->queue commandBuffer] retain];
   }
   return ctx->cmd;
@@ -75,9 +154,16 @@ static id<MTLCommandBuffer> mr_cmd(MRContext *ctx) {
 
 static void mr_end_encoders(MRContext *ctx) {
   if (ctx->render) {
+    if (ctx->renderDepth) {
+      [ctx->render setDepthStoreAction:(ctx->deadDepth == ctx->renderDepth) ? MTLStoreActionDontCare
+                                                                           : MTLStoreActionStore];
+    }
+    if (ctx->colorFormat != MTLPixelFormatInvalid)
+      [ctx->render setColorStoreAction:MTLStoreActionStore atIndex:0];
     [ctx->render endEncoding];
     [ctx->render release];
     ctx->render = nil;
+    ctx->renderDepth = nil;
   }
   if (ctx->blit) {
     [ctx->blit endEncoding];
@@ -88,9 +174,7 @@ static void mr_end_encoders(MRContext *ctx) {
 
 static id<MTLBlitCommandEncoder> mr_blit(MRContext *ctx) {
   if (ctx->render) {
-    [ctx->render endEncoding];
-    [ctx->render release];
-    ctx->render = nil;
+    mr_end_encoders(ctx);
   }
   if (!ctx->blit) {
     ctx->blit = [[mr_cmd(ctx) blitCommandEncoder] retain];
@@ -99,6 +183,142 @@ static id<MTLBlitCommandEncoder> mr_blit(MRContext *ctx) {
 }
 
 static uint64_t mr_now_ns() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+static double mr_timebase_ns_per_tick() {
+  static mach_timebase_info_data_t tb = {0, 0};
+  if (tb.denom == 0)
+    mach_timebase_info(&tb);
+  return (double)tb.numer / (double)tb.denom;
+}
+
+static void mr_setup_timestamps(MRContext *ctx) {
+  ctx->timestampsEnabled = false;
+  const char *flag = getenv("METALRENDER_GPUTIMES");
+  if (flag && flag[0] == '0')
+    return;
+  if (![ctx->device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
+    return;
+  id<MTLCounterSet> tsSet = nil;
+  for (id<MTLCounterSet> set in ctx->device.counterSets) {
+    if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+      tsSet = set;
+      break;
+    }
+  }
+  if (!tsSet)
+    return;
+  for (int i = 0; i < MR_SAMPLE_SLOTS; i++) {
+    MTLCounterSampleBufferDescriptor *d = [[[MTLCounterSampleBufferDescriptor alloc] init] autorelease];
+    d.counterSet = tsSet;
+    d.storageMode = MTLStorageModeShared;
+    d.sampleCount = MR_SAMPLES_PER_SLOT;
+    d.label = @"metalrender timestamps";
+    NSError *error = nil;
+    ctx->sampleBuffers[i] = [ctx->device newCounterSampleBufferWithDescriptor:d error:&error];
+    if (!ctx->sampleBuffers[i]) {
+      for (int j = 0; j < i; j++) {
+        [ctx->sampleBuffers[j] release];
+        ctx->sampleBuffers[j] = nil;
+      }
+      return;
+    }
+  }
+  MTLTimestamp cpu = 0, gpu = 0;
+  [ctx->device sampleTimestamps:&cpu gpuTimestamp:&gpu];
+  ctx->timeBaseCpu = cpu;
+  ctx->timeBaseGpu = gpu;
+  ctx->timestampsEnabled = true;
+}
+
+static int mr_pass_category(const std::string &label) {
+  if (label == "metalrender_terrain")
+    return 0;
+  if (label == "metalrender_water")
+    return 1;
+  if (label == "metalrender present")
+    return 3;
+  std::string lower = label;
+  for (auto &c : lower)
+    c = (char)tolower(c);
+  if (lower.find("gui") != std::string::npos)
+    return 2;
+  return 4;
+}
+
+static void mr_attach_samples(MRContext *ctx, MTLRenderPassDescriptor *rp, const std::string &label) {
+  if (!ctx->timestampsEnabled || ctx->sampleCursor + 2 > MR_SAMPLES_PER_SLOT)
+    return;
+  int index = ctx->sampleCursor;
+  rp.sampleBufferAttachments[0].sampleBuffer = ctx->sampleBuffers[ctx->sampleSlot];
+  rp.sampleBufferAttachments[0].startOfVertexSampleIndex = (NSUInteger)index;
+  rp.sampleBufferAttachments[0].endOfFragmentSampleIndex = (NSUInteger)(index + 1);
+  rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
+  rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
+  ctx->sampleCats[ctx->sampleCursor / 2] = (uint8_t)mr_pass_category(label);
+  ctx->sampleCursor += 2;
+  ctx->cmdHasSamples = true;
+}
+
+static void mr_collect_samples(MRContext *ctx, MRSampleRange range, id<MTLCounterSampleBuffer> buffer,
+                               uint64_t cpuBase, uint64_t gpuBase) {
+  if (range.count <= 0)
+    return;
+  NSData *data = [buffer resolveCounterRange:NSMakeRange((NSUInteger)range.first, (NSUInteger)range.count)];
+  if (!data || data.length < (NSUInteger)range.count * sizeof(MTLCounterResultTimestamp))
+    return;
+  MTLTimestamp cpu = 0, gpu = 0;
+  [ctx->device sampleTimestamps:&cpu gpuTimestamp:&gpu];
+  double scale = 1.0;
+  if (gpu > gpuBase && cpu > cpuBase)
+    scale = (double)(cpu - cpuBase) / (double)(gpu - gpuBase);
+  const MTLCounterResultTimestamp *values = (const MTLCounterResultTimestamp *)data.bytes;
+  std::lock_guard<std::mutex> lock(ctx->accMutex);
+  for (int i = 0; i + 1 < range.count; i += 2) {
+    uint64_t a = values[i].timestamp;
+    uint64_t b = values[i + 1].timestamp;
+    if (a == MTLCounterErrorValue || b == MTLCounterErrorValue || b <= a)
+      continue;
+    int cat = range.cats[i / 2];
+    ctx->frameAcc.ms[cat] += (double)(b - a) * scale / 1e6;
+  }
+}
+
+static void mr_publish_frame(MRContext *ctx, int encoders) {
+  MRFrameAcc acc;
+  {
+    std::lock_guard<std::mutex> lock(ctx->accMutex);
+    acc = ctx->frameAcc;
+    ctx->frameAcc = MRFrameAcc();
+  }
+  float total = 0.0f;
+  for (int i = 0; i < MR_PASS_CATEGORIES; i++) {
+    g_backendPassMs[i].store((float)acc.ms[i]);
+    total += (float)acc.ms[i];
+  }
+  g_backendGpuMs.store(total);
+  g_backendEncoders.store(encoders);
+}
+
+static CVReturn mr_display_link_callback(CVDisplayLinkRef, const CVTimeStamp *, const CVTimeStamp *outputTime,
+                                         CVOptionFlags, CVOptionFlags *, void *) {
+  double nsPerTick = mr_timebase_ns_per_tick();
+  g_nextRefreshNs.store((uint64_t)((double)outputTime->hostTime * nsPerTick));
+  if (outputTime->videoTimeScale > 0)
+    g_refreshPeriodNs.store((uint64_t)(1e9 * (double)outputTime->videoRefreshPeriod /
+                                       (double)outputTime->videoTimeScale));
+  return kCVReturnSuccess;
+}
+
+static void mr_start_display_link() {
+  if (g_displayLink)
+    return;
+  if (CVDisplayLinkCreateWithCGDisplay(CGMainDisplayID(), &g_displayLink) != kCVReturnSuccess)
+    g_displayLink = nullptr;
+  if (!g_displayLink)
+    return;
+  CVDisplayLinkSetOutputCallback(g_displayLink, mr_display_link_callback, nullptr);
+  CVDisplayLinkStart(g_displayLink);
+}
 
 extern "C" JNIEXPORT jlongArray JNICALL MR_JNI(nDeviceCreate)(JNIEnv *env, jclass) {
   @autoreleasepool {
@@ -212,6 +432,8 @@ extern "C" JNIEXPORT jlong JNICALL MR_JNI(nSurfaceCreate)(JNIEnv *, jclass, jlon
     layer.contentsScale = window.backingScaleFactor;
     layer.drawableSize = CGSizeMake(width > 0 ? width : 1, height > 0 ? height : 1);
     view.layer = layer;
+    g_vsyncOn.store(vsync ? true : false);
+    mr_start_display_link();
     return (jlong)(uintptr_t)layer;
   }
 }
@@ -228,6 +450,41 @@ extern "C" JNIEXPORT void JNICALL MR_JNI(nSurfaceSetVsync)(JNIEnv *, jclass, jlo
   CAMetalLayer *layer = (CAMetalLayer *)(uintptr_t)layerHandle;
   if (layer)
     layer.displaySyncEnabled = vsync ? YES : NO;
+  g_vsyncOn.store(vsync ? true : false);
+}
+
+extern "C" JNIEXPORT void JNICALL MR_JNI(nSetPacedPresent)(JNIEnv *, jclass, jboolean enabled) {
+  g_pacedAllowed.store(enabled ? true : false);
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL MR_JNI(nBackendStats)(JNIEnv *env, jclass) {
+  jlong values[3] = {(jlong)g_backendEncoders.load(), (jlong)g_backendPresents.load(),
+                     (jlong)g_backendSkippedPresents.load()};
+  jlongArray out = env->NewLongArray(3);
+  env->SetLongArrayRegion(out, 0, 3, values);
+  return out;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetPhysicalMemory(JNIEnv *, jclass) {
+  return (jlong)[[NSProcessInfo processInfo] physicalMemory];
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nPreciseSleep(JNIEnv *, jclass, jlong nanos) {
+  static int kq = -1;
+  if (nanos <= 0)
+    return 0;
+  if (kq < 0)
+    kq = kqueue();
+  if (kq < 0)
+    return -1;
+  struct kevent64_s change;
+  EV_SET64(&change, 1, EVFILT_TIMER, EV_ADD | EV_ENABLE | EV_ONESHOT,
+           NOTE_NSECONDS | NOTE_CRITICAL | NOTE_LEEWAY, (int64_t)nanos, 0, 0, 0);
+  struct kevent64_s event;
+  int n = kevent64(kq, &change, 1, &event, 1, 0, nullptr);
+  return n >= 0 ? 0 : -1;
 }
 
 extern "C" JNIEXPORT jlong JNICALL MR_JNI(nBufferCreate)(JNIEnv *, jclass, jlong device, jlong size,
@@ -435,7 +692,8 @@ extern "C" JNIEXPORT jlong JNICALL MR_JNI(nCtxCreate)(JNIEnv *, jclass, jlong de
     ctx->library = [(id<MTLLibrary>)(uintptr_t)library retain];
     ctx->event = [ctx->device newSharedEvent];
     ctx->event.signaledValue = 0;
-    ctx->frameSemaphore = dispatch_semaphore_create(2);
+    mr_setup_timestamps(ctx);
+    g_backendCtx = ctx;
     NSError *error = nil;
     MTLRenderPipelineDescriptor *desc = [[[MTLRenderPipelineDescriptor alloc] init] autorelease];
     desc.vertexFunction = [[ctx->library newFunctionWithName:@"mr_present_vertex"] autorelease];
@@ -465,6 +723,8 @@ extern "C" JNIEXPORT void JNICALL MR_JNI(nCtxDestroy)(JNIEnv *, jclass, jlong ha
   MRContext *ctx = (MRContext *)(uintptr_t)handle;
   if (!ctx)
     return;
+  if (g_backendCtx == ctx)
+    g_backendCtx = nullptr;
   mr_end_encoders(ctx);
   if (ctx->cmd) {
     [ctx->cmd commit];
@@ -481,8 +741,8 @@ extern "C" JNIEXPORT void JNICALL MR_JNI(nCtxDestroy)(JNIEnv *, jclass, jlong ha
   [ctx->library release];
   [ctx->queue release];
   [ctx->device release];
-  if (ctx->frameSemaphore)
-    dispatch_release(ctx->frameSemaphore);
+  for (int i = 0; i < MR_SAMPLE_SLOTS; i++)
+    [ctx->sampleBuffers[i] release];
   delete ctx;
 }
 
@@ -505,7 +765,7 @@ extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxBeginRender)(JNIEnv *env, jclas
       rp.colorAttachments[0].slice = (NSUInteger)colorSlice;
       rp.colorAttachments[0].loadAction = clearColor ? MTLLoadActionClear : MTLLoadActionLoad;
       rp.colorAttachments[0].clearColor = MTLClearColorMake(r, g, b, a);
-      rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+      rp.colorAttachments[0].storeAction = MTLStoreActionUnknown;
       width = (int)MAX((NSUInteger)1, color.width >> colorLevel);
       height = (int)MAX((NSUInteger)1, color.height >> colorLevel);
     }
@@ -515,7 +775,7 @@ extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxBeginRender)(JNIEnv *env, jclas
       rp.depthAttachment.slice = (NSUInteger)depthSlice;
       rp.depthAttachment.loadAction = clearDepth ? MTLLoadActionClear : MTLLoadActionLoad;
       rp.depthAttachment.clearDepth = depth;
-      rp.depthAttachment.storeAction = MTLStoreActionStore;
+      rp.depthAttachment.storeAction = MTLStoreActionUnknown;
       if (!color) {
         width = (int)MAX((NSUInteger)1, depthTexture.width >> depthLevel);
         height = (int)MAX((NSUInteger)1, depthTexture.height >> depthLevel);
@@ -525,14 +785,18 @@ extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxBeginRender)(JNIEnv *env, jclas
       g_backendLastError = "render pass without attachments";
       return JNI_FALSE;
     }
-    ctx->render = [[mr_cmd(ctx) renderCommandEncoderWithDescriptor:rp] retain];
+    std::string labelText = label ? mr_jstring(env, label) : std::string();
+    id<MTLCommandBuffer> cmdBuffer = mr_cmd(ctx);
+    mr_attach_samples(ctx, rp, labelText);
+    ctx->render = [[cmdBuffer renderCommandEncoderWithDescriptor:rp] retain];
     if (!ctx->render) {
       g_backendLastError = "renderCommandEncoderWithDescriptor failed";
       return JNI_FALSE;
     }
+    ctx->renderDepth = depthTexture;
+    ctx->frameEncoders++;
     if (label) {
-      std::string s = mr_jstring(env, label);
-      ctx->render.label = [NSString stringWithUTF8String:s.c_str()];
+      ctx->render.label = [NSString stringWithUTF8String:labelText.c_str()];
     }
     ctx->targetWidth = width;
     ctx->targetHeight = height;
@@ -653,8 +917,10 @@ extern "C" JNIEXPORT void JNICALL MR_JNI(nCtxDrawIndexed)(JNIEnv *, jclass, jlon
                         baseInstance:0];
 }
 
-static id<MTLRenderPipelineState> mr_clear_pipeline(MRContext *ctx) {
+static id<MTLRenderPipelineState> mr_clear_pipeline(MRContext *ctx, bool depthOnly = false) {
   uint64_t key = ((uint64_t)ctx->colorFormat << 32) | (uint64_t)ctx->depthFormat;
+  if (depthOnly)
+    key |= (1ull << 63);
   auto it = ctx->clearPipelines.find(key);
   if (it != ctx->clearPipelines.end())
     return it->second;
@@ -663,6 +929,8 @@ static id<MTLRenderPipelineState> mr_clear_pipeline(MRContext *ctx) {
   desc.vertexFunction = [[ctx->library newFunctionWithName:@"mr_clear_vertex"] autorelease];
   desc.fragmentFunction = [[ctx->library newFunctionWithName:@"mr_clear_fragment"] autorelease];
   desc.colorAttachments[0].pixelFormat = ctx->colorFormat;
+  if (depthOnly && ctx->colorFormat != MTLPixelFormatInvalid)
+    desc.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
   desc.depthAttachmentPixelFormat = ctx->depthFormat;
   id<MTLRenderPipelineState> pso = [ctx->device newRenderPipelineStateWithDescriptor:desc error:&error];
   if (!pso) {
@@ -704,6 +972,35 @@ extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxClearRect)(JNIEnv *, jclass, jl
       [ctx->render drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     MTLScissorRect full = {0, 0, (NSUInteger)ctx->targetWidth, (NSUInteger)ctx->targetHeight};
     [ctx->render setScissorRect:full];
+    return JNI_TRUE;
+  }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxClearDepthFolded)(JNIEnv *, jclass, jlong handle,
+                                                                   jdouble depth) {
+  @autoreleasepool {
+    MRContext *ctx = (MRContext *)(uintptr_t)handle;
+    if (!ctx->render || ctx->depthFormat == MTLPixelFormatInvalid)
+      return JNI_FALSE;
+    id<MTLRenderPipelineState> pso = mr_clear_pipeline(ctx, true);
+    if (!pso)
+      return JNI_FALSE;
+    struct {
+      float color[4];
+      float depth;
+    } params = {{0, 0, 0, 0}, (float)depth};
+    [ctx->render setRenderPipelineState:pso];
+    [ctx->render setDepthStencilState:ctx->clearDepthWrite];
+    [ctx->render setCullMode:MTLCullModeNone];
+    [ctx->render setTriangleFillMode:MTLTriangleFillModeFill];
+    [ctx->render setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+    [ctx->render setVertexBytes:&params length:sizeof(params) atIndex:0];
+    [ctx->render setFragmentBytes:&params length:sizeof(params) atIndex:0];
+    MTLScissorRect full = {0, 0, (NSUInteger)ctx->targetWidth, (NSUInteger)ctx->targetHeight};
+    [ctx->render setScissorRect:full];
+    MTLViewport vp = {0.0, 0.0, (double)ctx->targetWidth, (double)ctx->targetHeight, 0.0, 1.0};
+    [ctx->render setViewport:vp];
+    [ctx->render drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     return JNI_TRUE;
   }
 }
@@ -774,23 +1071,56 @@ extern "C" JNIEXPORT void JNICALL MR_JNI(nCtxCopyTextureToTexture)(JNIEnv *, jcl
               destinationOrigin:MTLOriginMake((NSUInteger)dx, (NSUInteger)dy, 0)];
 }
 
+static bool mr_should_present(MRContext *ctx) {
+  uint64_t now = mr_now_ns();
+  if (ctx->lastPresentCallNs) {
+    double interval = (double)(now - ctx->lastPresentCallNs);
+    interval = std::max(interval - (double)ctx->lastDrawableWaitNs, 500000.0);
+    ctx->lastDrawableWaitNs = 0;
+    ctx->avgFrameIntervalNs = ctx->avgFrameIntervalNs == 0.0 ? interval
+                                                            : ctx->avgFrameIntervalNs * 0.9 + interval * 0.1;
+  }
+  ctx->lastPresentCallNs = now;
+  if (!g_pacedAllowed.load() || g_vsyncOn.load())
+    return true;
+  uint64_t period = g_refreshPeriodNs.load();
+  uint64_t next = g_nextRefreshNs.load();
+  if (period == 0 || next == 0 || ctx->avgFrameIntervalNs == 0.0)
+    return true;
+  if (ctx->lastPresentNs && now - ctx->lastPresentNs > period * 2)
+    return true;
+  return ctx->lastPresentNs == 0 || now - ctx->lastPresentNs >= (uint64_t)((double)period * 0.85);
+}
+
 extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxPresent)(JNIEnv *, jclass, jlong handle, jlong layerHandle,
-                                                          jlong sourceTexture) {
+                                                          jlong sourceTexture, jlong mainDepth) {
   @autoreleasepool {
     MRContext *ctx = (MRContext *)(uintptr_t)handle;
     CAMetalLayer *layer = (CAMetalLayer *)(uintptr_t)layerHandle;
     id<MTLTexture> source = (id<MTLTexture>)(uintptr_t)sourceTexture;
+    ctx->deadDepth = (id<MTLTexture>)(uintptr_t)mainDepth;
     mr_end_encoders(ctx);
+    ctx->deadDepth = nil;
     if (!layer || !source)
       return JNI_FALSE;
+    if (!mr_should_present(ctx)) {
+      g_backendSkippedPresents.fetch_add(1);
+      return JNI_TRUE;
+    }
+    uint64_t waitStart = mr_now_ns();
     id<CAMetalDrawable> drawable = [layer nextDrawable];
+    ctx->lastDrawableWaitNs = mr_now_ns() - waitStart;
     if (!drawable)
       return JNI_FALSE;
+    ctx->lastPresentNs = mr_now_ns();
+    g_backendPresents.fetch_add(1);
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = drawable.texture;
     rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLCommandBuffer> cmd = mr_cmd(ctx);
+    mr_attach_samples(ctx, rp, "metalrender present");
+    ctx->frameEncoders++;
     id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:rp];
     enc.label = @"metalrender present";
     MTLViewport vp = {0.0, 0.0, (double)drawable.texture.width, (double)drawable.texture.height, 0.0, 1.0};
@@ -811,17 +1141,56 @@ extern "C" JNIEXPORT jlong JNICALL MR_JNI(nCtxSubmit)(JNIEnv *, jclass, jlong ha
     id<MTLCommandBuffer> cmd = mr_cmd(ctx);
     uint64_t serial = ctx->openSerial++;
     [cmd encodeSignalEvent:ctx->event value:serial];
-    if (frameEnd) {
-      dispatch_semaphore_t sem = ctx->frameSemaphore;
-      [cmd addCompletedHandler:^(id<MTLCommandBuffer>) {
-        dispatch_semaphore_signal(sem);
-      }];
+    MRSampleRange range;
+    id<MTLCounterSampleBuffer> sampleBuffer = nil;
+    if (ctx->cmdHasSamples) {
+      range.slot = ctx->sampleSlot;
+      range.first = 0;
+      range.count = ctx->sampleCursor;
+      memcpy(range.cats, ctx->sampleCats, sizeof(range.cats));
+      sampleBuffer = ctx->sampleBuffers[ctx->sampleSlot];
+      [sampleBuffer retain];
+      ctx->sampleCursor = 0;
+      ctx->cmdHasSamples = false;
+      ctx->sampleSlot = (ctx->sampleSlot + 1) % MR_SAMPLE_SLOTS;
     }
+    int encoders = 0;
+    uint64_t endedFrame = 0;
+    if (frameEnd) {
+      encoders = ctx->frameEncoders;
+      ctx->frameEncoders = 0;
+      endedFrame = g_backendFrameInProgress.fetch_add(1, std::memory_order_acq_rel);
+    }
+    uint64_t cpuBase = ctx->timeBaseCpu, gpuBase = ctx->timeBaseGpu;
+    uint64_t submitNs = mr_now_ns();
+    bool presented = frameEnd && ctx->lastPresentNs >= submitNs - 50000000ull;
+    bool isFrameEnd = frameEnd;
+    [cmd addCompletedHandler:^(id<MTLCommandBuffer>) {
+      if (sampleBuffer) {
+        mr_collect_samples(ctx, range, sampleBuffer, cpuBase, gpuBase);
+        [sampleBuffer release];
+      }
+      if (isFrameEnd) {
+        g_backendCompletedFrame.store(endedFrame, std::memory_order_release);
+        if (ctx->timestampsEnabled)
+          mr_publish_frame(ctx, encoders);
+        if (presented) {
+          uint64_t latency = mr_now_ns() - submitNs;
+          uint64_t old = g_gpuLatencyNs.load();
+          g_gpuLatencyNs.store(old == 0 ? latency : (uint64_t)((double)old * 0.9 + (double)latency * 0.1));
+        }
+      }
+    }];
     [cmd commit];
     [cmd release];
     ctx->cmd = nil;
-    if (frameEnd)
-      dispatch_semaphore_wait(ctx->frameSemaphore, DISPATCH_TIME_FOREVER);
+    if (frameEnd) {
+      ctx->frameSerials[0] = ctx->frameSerials[1];
+      ctx->frameSerials[1] = serial;
+      ctx->frameWaitPending = true;
+      if (!ctx->timestampsEnabled)
+        g_backendEncoders.store(encoders);
+    }
     return (jlong)serial;
   }
 }

@@ -205,18 +205,33 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
             return;
         }
         long pso = compiled.pipelineState(colorFormat, depthFormat);
-        if (pso == 0 || !encoder.ensureRenderEncoder(this)) {
+        if (pso == 0) {
+            return;
+        }
+        List<String> samplerNames = info.getSamplers();
+        for (int i = 0; i < samplerNames.size(); i++) {
+            Binding binding = samplers.get(samplerNames.get(i));
+            if (binding != null && !binding.view().isClosed()) {
+                encoder.flushPendingClears(binding.view().texture());
+            }
+        }
+        if (!encoder.ensureRenderEncoder(this)) {
             return;
         }
         long ctx = encoder.ctx();
         long serial = encoder.openSerial();
-        MetalNative.nCtxSetPipeline(ctx, pso, compiled.depthState(depthTexture != 0),
-                compiled.cullMode(), MetalNative.WINDING_CLOCKWISE, compiled.fillMode(),
-                compiled.depthBias(), compiled.slopeScale());
-        if (scissorEnabled) {
-            MetalNative.nCtxSetScissor(ctx, scissorX, scissorY, scissorWidth, scissorHeight);
-        } else {
-            MetalNative.nCtxSetScissor(ctx, 0, 0, targetWidth, targetHeight);
+        long depthState = compiled.depthState(depthTexture != 0);
+        if (encoder.bindPipeline(pso, depthState)) {
+            MetalNative.nCtxSetPipeline(ctx, pso, depthState, compiled.cullMode(),
+                    MetalNative.WINDING_CLOCKWISE, compiled.fillMode(), compiled.depthBias(),
+                    compiled.slopeScale());
+        }
+        int sx = scissorEnabled ? scissorX : 0;
+        int sy = scissorEnabled ? scissorY : 0;
+        int sw = scissorEnabled ? scissorWidth : targetWidth;
+        int sh = scissorEnabled ? scissorHeight : targetHeight;
+        if (encoder.bindScissor(sx, sy, sw, sh)) {
+            MetalNative.nCtxSetScissor(ctx, sx, sy, sw, sh);
         }
         for (Map.Entry<String, GpuBufferSlice> entry : uniforms.entrySet()) {
             String name = entry.getKey();
@@ -234,10 +249,11 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
             if (!texel) {
                 device.bindings().checkSize(name, slice.length());
             }
-            MetalNative.nCtxSetBuffer(ctx, buffer.handle(), slice.offset(), slot);
+            if (encoder.bindBuffer(slot, buffer.handle(), slice.offset())) {
+                MetalNative.nCtxSetBuffer(ctx, buffer.handle(), slice.offset(), slot);
+            }
             buffer.lastUseFrame = serial;
         }
-        List<String> samplerNames = info.getSamplers();
         for (int i = 0; i < samplerNames.size(); i++) {
             Binding binding = samplers.get(samplerNames.get(i));
             if (binding == null || binding.view().isClosed() || binding.sampler().isClosed()) {
@@ -245,10 +261,14 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
             }
             int slot = binding.view().texture().isCube() ? MetalBindings.CUBE_TEXTURE_SLOT
                     : MetalBindings.textureSlot(samplerNames.get(i), i);
-            MetalNative.nCtxSetTexture(ctx, binding.view().handle(), binding.sampler().handle(), slot);
+            if (encoder.bindTexture(slot, binding.view().handle(), binding.sampler().handle())) {
+                MetalNative.nCtxSetTexture(ctx, binding.view().handle(), binding.sampler().handle(), slot);
+            }
         }
         if (hasFormat) {
-            MetalNative.nCtxSetVertexBuffer(ctx, vertexBuffer.handle(), 0, 0);
+            if (encoder.bindVertex(vertexBuffer.handle())) {
+                MetalNative.nCtxSetVertexBuffer(ctx, vertexBuffer.handle(), 0, 0);
+            }
             vertexBuffer.lastUseFrame = serial;
         }
         if (compiled.triangleFan()) {
@@ -306,6 +326,7 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
         if (closed || !encoder.ensureRenderEncoder(this)) {
             return 0;
         }
+        encoder.invalidateBindings();
         return MetalNative.nCtxRenderEncoder(encoder.ctx());
     }
 
@@ -320,6 +341,7 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
     public void restoreNativeState() {
         if (encoder.isEncoding(this)) {
             MetalNative.nCtxRestoreViewport(encoder.ctx());
+            encoder.invalidateBindings();
         }
     }
 
