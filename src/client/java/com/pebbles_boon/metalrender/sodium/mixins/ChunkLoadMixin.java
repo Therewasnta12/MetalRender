@@ -21,7 +21,7 @@ public class ChunkLoadMixin {
             int x, int z, FriendlyByteBuf buf, Map<?, ?> heightmaps,
             Consumer<ClientboundLevelChunkPacketData.BlockEntityTagOutput> blockEntityOutput,
             CallbackInfoReturnable<LevelChunk> cir) {
-        if (!MetalRenderClient.isEnabled())
+        if (!MetalWorldRenderer.legacyTerrainEnabled() || !MetalRenderClient.isEnabled())
             return;
         MetalWorldRenderer wr = MetalWorldRenderer.getInstance();
         if (wr == null || !wr.isReady()) {

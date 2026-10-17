@@ -47,6 +47,9 @@ public class WorldRendererTerrainMixin {
             ChunkSectionLayerGroup group,
             GpuSampler sampler) {
         if (metalrender$shouldSkipVanillaTerrain()) {
+            if (MetalRenderClient.isBackendMode()) {
+                MetalRenderClient.getWorldRenderer().renderTerrainOpaque();
+            }
             return;
         }
         sections.renderGroup(group, sampler);
@@ -60,6 +63,9 @@ public class WorldRendererTerrainMixin {
             ChunkSectionLayerGroup group,
             GpuSampler sampler) {
         if (metalrender$shouldSkipVanillaTerrain()) {
+            if (MetalRenderClient.isBackendMode()) {
+                MetalRenderClient.getWorldRenderer().renderTerrainTranslucent();
+            }
             return;
         }
         sections.renderGroup(group, sampler);
@@ -67,7 +73,7 @@ public class WorldRendererTerrainMixin {
 
     @Inject(method = "lambda$addMainPass$0", at = @At("HEAD"), cancellable = true, require = 0)
     private void metalrender$terrainHookHeartbeat(CallbackInfo ci) {
-        if (!metalrender$shouldSkipVanillaTerrain()) {
+        if (MetalRenderClient.isBackendMode() || !metalrender$shouldSkipVanillaTerrain()) {
             return;
         }
         metalrender$skippedTerrainGroups++;

@@ -15,6 +15,8 @@ public abstract class GameRendererMixin {
             "CommandEncoder;clearDepthTexture(Lcom/mojang/" +
             "blaze3d/textures/GpuTexture;D)V", remap = false), require = 0)
     private void metalrender$blitBeforeHandRender(DeltaTracker deltaTracker, CallbackInfo ci) {
+        if (MetalRenderClient.isBackendMode())
+            return;
         MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
         if (worldRenderer == null || !worldRenderer.metalActive())
             return;
