@@ -26,6 +26,7 @@ public final class MetalRenderConfig {
     public int lodNearChunks = 6;
     public int lodMidChunks = 16;
     public boolean enableGreedyMid = true;
+    public boolean gpuDrivenTerrain = true;
     public boolean enableGreedyFar = true;
     public boolean lodThermalAdaptive = true;
     public boolean lodThroughputBudget = true;
@@ -144,6 +145,8 @@ public final class MetalRenderConfig {
                     cfg.lodViewImpact = obj.get("lodViewImpact").getAsBoolean();
                 if (obj.has("lodSkeletonFirst"))
                     cfg.lodSkeletonFirst = obj.get("lodSkeletonFirst").getAsBoolean();
+                if (obj.has("gpuDrivenTerrain"))
+                    cfg.gpuDrivenTerrain = obj.get("gpuDrivenTerrain").getAsBoolean();
                 if (obj.has("enableGreedyMid"))
                     cfg.enableGreedyMid = obj.get("enableGreedyMid").getAsBoolean();
                 if (obj.has("enableGreedyFar"))
@@ -225,6 +228,7 @@ public final class MetalRenderConfig {
             obj.addProperty("lodStickyTiers", lodStickyTiers);
             obj.addProperty("lodViewImpact", lodViewImpact);
             obj.addProperty("lodSkeletonFirst", lodSkeletonFirst);
+            obj.addProperty("gpuDrivenTerrain", gpuDrivenTerrain);
             obj.addProperty("enableGreedyMid", enableGreedyMid);
             obj.addProperty("enableGreedyFar", enableGreedyFar);
             obj.addProperty("uiTheme", uiTheme);
@@ -309,6 +313,8 @@ public final class MetalRenderConfig {
         switch (terrainPath) {
             case "vertex" -> enableMeshShaders = false;
             case "mesh" -> enableMeshShaders = true;
+            case "indirect" -> {
+            }
             default -> terrainPath = "auto";
         }
         if (enableMeshShaders && com.pebbles_boon.metalrender.nativebridge.MetalHardwareChecker.supportsMeshShaders()) {

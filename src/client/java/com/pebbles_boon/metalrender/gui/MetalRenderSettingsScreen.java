@@ -1299,6 +1299,7 @@ public class MetalRenderSettingsScreen extends Screen {
     private void buildPerformance() {
         sec("Frame Pacing");
         sld("Target FPS", 30, 50000, 30, pendingTargetFps, v -> pendingTargetFps = (int) (float) v);
+        tog("GPU-Driven Terrain (restart)", config.gpuDrivenTerrain, v -> config.gpuDrivenTerrain = v);
         tog("Triple Buffering", config.enableTripleBuffering, v -> config.enableTripleBuffering = v);
         tog("Burst Thread Mode", config.enableBurstThreadMode, v -> config.enableBurstThreadMode = v);
         tog("Sacrifice TPS for FPS", config.prioritizeFpsOverTps, v -> config.prioritizeFpsOverTps = v);
@@ -1335,6 +1336,7 @@ public class MetalRenderSettingsScreen extends Screen {
             config.terrainPath = switch (config.terrainPath) {
                 case "auto" -> "vertex";
                 case "vertex" -> "mesh";
+                case "mesh" -> "indirect";
                 default -> "auto";
             };
             System.setProperty("metalrender.terrainPath", config.terrainPath);

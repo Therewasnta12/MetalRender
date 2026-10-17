@@ -158,7 +158,28 @@ public class MinecraftClientMixin {
             target = "Lnet/minecraft/client/FramerateLimiter;limitDisplayFPS(I)V"))
     private void metalrender$timeLimiter(int fps) {
         long t0 = System.nanoTime();
-        net.minecraft.client.FramerateLimiter.limitDisplayFPS(fps);
+        if (PRECISE_LIMITER && fps > 0 && com.pebbles_boon.metalrender.nativebridge.NativeBridge.isLibLoaded()) {
+            long period = 1_000_000_000L / fps;
+            long target = metalrender$lastLimitedFrame + period;
+            long remaining = target - System.nanoTime();
+            if (remaining > 200_000L) {
+                com.pebbles_boon.metalrender.nativebridge.NativeBridge.nPreciseSleep(remaining - 100_000L);
+            }
+            while (System.nanoTime() < target) {
+                Thread.onSpinWait();
+            }
+            long now = System.nanoTime();
+            metalrender$lastLimitedFrame = now - target > period ? now : target;
+        } else {
+            net.minecraft.client.FramerateLimiter.limitDisplayFPS(fps);
+        }
         MetalRenderProfiler.getInstance().recordLimiter(System.nanoTime() - t0);
     }
+
+    @org.spongepowered.asm.mixin.Unique
+    private static final boolean PRECISE_LIMITER = com.pebbles_boon.metalrender.config.MetalRenderConfig
+            .getBool("metalrender.preciseLimiter", true);
+
+    @org.spongepowered.asm.mixin.Unique
+    private static long metalrender$lastLimitedFrame = System.nanoTime();
 }
