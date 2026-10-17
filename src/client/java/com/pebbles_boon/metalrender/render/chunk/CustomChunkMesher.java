@@ -273,6 +273,16 @@ public class CustomChunkMesher {
         lodForceCoarse = Math.max(0, Math.min(2, cap));
     }
 
+    public static int lodNearRing() {
+        MetalRenderConfig cfg = MetalRenderClient.getConfig();
+        return cfg == null ? 6 : Math.max(2, cfg.lodNearChunks - lodThermalBias * 2);
+    }
+
+    public static int lodMidRing() {
+        MetalRenderConfig cfg = MetalRenderClient.getConfig();
+        return cfg == null ? 14 : Math.max(lodNearRing() + 2, cfg.lodMidChunks - lodThermalBias * 4);
+    }
+
     public static int lodTierForDistance(int chunkDist) {
         MetalRenderConfig cfg = MetalRenderClient.getConfig();
         if (cfg == null || !cfg.enableDistanceLod) {

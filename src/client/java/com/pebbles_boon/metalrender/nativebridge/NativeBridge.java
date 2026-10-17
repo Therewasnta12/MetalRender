@@ -232,6 +232,12 @@ public final class NativeBridge {
 
     public static native int nArenaStats(long[] out);
 
+    public static native int nArenaSeenAge(int cx, int cy, int cz);
+
+    public static native void nArenaSetLodRings(int nearChunks, int midChunks);
+
+    public static native int nArenaPollLodRequests(int[] out);
+
     public static native void nTerrainPrepare();
 
     public static native int nGetCullFailsafeFrames();

@@ -1350,6 +1350,44 @@ public class MetalWorldRenderer {
         }
     }
 
+    private final it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap gpuLodWishes =
+            new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
+    private final int[] gpuLodRequestBuf = new int[4 * 512];
+
+    private void refreshGpuLodWishes() {
+        try {
+            NativeBridge.nArenaSetLodRings(CustomChunkMesher.lodNearRing(), CustomChunkMesher.lodMidRing());
+            int n = NativeBridge.nArenaPollLodRequests(gpuLodRequestBuf);
+            if (n <= 0) {
+                return;
+            }
+            gpuLodWishes.clear();
+            for (int i = 0; i < n; i++) {
+                int b = i * 4;
+                gpuLodWishes.put(packChunkKey(gpuLodRequestBuf[b], gpuLodRequestBuf[b + 1], gpuLodRequestBuf[b + 2]),
+                        gpuLodRequestBuf[b + 3]);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private int gpuLodWish(int cx, int cy, int cz, int fallback) {
+        if (gpuLodWishes.isEmpty()) {
+            return fallback;
+        }
+        return gpuLodWishes.getOrDefault(packChunkKey(cx, cy, cz), fallback);
+    }
+
+    private static boolean gpuSeenRecently(int cx, int cy, int cz) {
+        int age;
+        try {
+            age = NativeBridge.nArenaSeenAge(cx, cy, cz);
+        } catch (Throwable t) {
+            return true;
+        }
+        return age < 0 || age <= 8;
+    }
+
     private static long packChunkKey(int cx, int cy, int cz) {
         return ((long) (cx & 0x3FFFFF) << 42) | ((long) (cy & 0xFFFFF) << 22) |
                 (cz & 0x3FFFFF);
@@ -2123,6 +2161,7 @@ public class MetalWorldRenderer {
             haveCam = true;
         }
 
+        refreshGpuLodWishes();
         java.util.ArrayList<LodCandidate> upgrades = lodUpgradeScratch;
         java.util.ArrayList<LodCandidate> demotions = lodDemotionScratch;
         upgrades.clear();
@@ -2157,6 +2196,7 @@ public class MetalWorldRenderer {
             if (prefetchLod < targetLod) {
                 targetLod = prefetchLod;
             }
+            targetLod = Math.min(targetLod, gpuLodWish(mesh.chunkX, mesh.chunkY, mesh.chunkZ, targetLod));
             if (mesh.lodTier == targetLod) {
                 continue;
             }
@@ -2175,7 +2215,8 @@ public class MetalWorldRenderer {
                     float ox = (float) (mesh.chunkX * 16.0 - camX);
                     float oy = (float) (mesh.chunkY * 16.0 - camY);
                     float oz = (float) (mesh.chunkZ * 16.0 - camZ);
-                    visible = frustumCuller.testBoundingBox(ox, oy, oz, ox + 16.0f, oy + 16.0f, oz + 16.0f);
+                    visible = frustumCuller.testBoundingBox(ox, oy, oz, ox + 16.0f, oy + 16.0f, oz + 16.0f)
+                            && gpuSeenRecently(mesh.chunkX, mesh.chunkY, mesh.chunkZ);
                 } catch (Exception ignored) {
                     visible = true;
                 }
@@ -2397,6 +2438,7 @@ public class MetalWorldRenderer {
             return;
         }
 
+        refreshGpuLodWishes();
         java.util.ArrayList<LodCandidate> upgrades = lodUpgradeScratch;
         java.util.ArrayList<LodCandidate> demotions = lodDemotionScratch;
         upgrades.clear();
@@ -2431,6 +2473,7 @@ public class MetalWorldRenderer {
             if (prefetchTier < targetLod) {
                 targetLod = prefetchTier;
             }
+            targetLod = Math.min(targetLod, gpuLodWish(mesh.chunkX, mesh.chunkY, mesh.chunkZ, targetLod));
             if (mesh.lodTier == targetLod) {
                 continue;
             }
@@ -2449,7 +2492,8 @@ public class MetalWorldRenderer {
                     float ox = (float) (mesh.chunkX * 16.0 - camX);
                     float oy = (float) (mesh.chunkY * 16.0 - camY);
                     float oz = (float) (mesh.chunkZ * 16.0 - camZ);
-                    visible = frustumCuller.testBoundingBox(ox, oy, oz, ox + 16.0f, oy + 16.0f, oz + 16.0f);
+                    visible = frustumCuller.testBoundingBox(ox, oy, oz, ox + 16.0f, oy + 16.0f, oz + 16.0f)
+                            && gpuSeenRecently(mesh.chunkX, mesh.chunkY, mesh.chunkZ);
                 } catch (Exception ignored) {
                     visible = true;
                 }
