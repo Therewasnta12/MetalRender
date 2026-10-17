@@ -12,6 +12,7 @@ public final class MetalRenderConfig {
     public boolean enableMemoryPressureFallback = true;
     public boolean enableBurstThreadMode = true;
     public boolean enableMeshShaders = true;
+    public String terrainPath = "auto";
     public boolean enableArgumentBuffers = true;
     public boolean enableClusterFrustumCulling = false;
     public boolean enableGpuTranslucencySort = false;
@@ -99,6 +100,7 @@ public final class MetalRenderConfig {
                     cfg.enableMemoryPressureFallback = obj.get("enableMemoryPressureFallback").getAsBoolean();
                 if (obj.has("enableBurstThreadMode"))
                     cfg.enableBurstThreadMode = obj.get("enableBurstThreadMode").getAsBoolean();
+                if (obj.has("terrainPath")) cfg.terrainPath = obj.get("terrainPath").getAsString();
                 if (obj.has("enableMeshShaders"))
                     cfg.enableMeshShaders = obj.get("enableMeshShaders").getAsBoolean();
                 if (obj.has("enableArgumentBuffers"))
@@ -170,6 +172,7 @@ public final class MetalRenderConfig {
 
         }
 
+        cfg.enableMetalRendering = getBool("metalrender.enabled", cfg.enableMetalRendering);
         cfg.loadFeatureFlags();
         loadFromSystemProperties();
         return cfg;
@@ -183,6 +186,7 @@ public final class MetalRenderConfig {
         System.setProperty("metalrender.enabled", String.valueOf(enableMetalRendering));
         System.setProperty("metalrender.feature.icb",
                 String.valueOf(enableIndirectCommandBuffers));
+        System.setProperty("metalrender.terrainPath", terrainPath);
         System.setProperty("metalrender.feature.mesh", String.valueOf(enableMeshShaders));
         System.setProperty("metalrender.feature.argbuf", String.valueOf(enableArgumentBuffers));
         System.setProperty("metalrender.feature.oit", String.valueOf(enableProgrammableBlending));
@@ -199,6 +203,7 @@ public final class MetalRenderConfig {
             obj.addProperty("enableTripleBuffering", enableTripleBuffering);
             obj.addProperty("enableMemoryPressureFallback", enableMemoryPressureFallback);
             obj.addProperty("enableBurstThreadMode", enableBurstThreadMode);
+            obj.addProperty("terrainPath", terrainPath);
             obj.addProperty("enableMeshShaders", enableMeshShaders);
             obj.addProperty("enableArgumentBuffers", enableArgumentBuffers);
             obj.addProperty("enableClusterFrustumCulling", enableClusterFrustumCulling);
@@ -300,12 +305,18 @@ public final class MetalRenderConfig {
         enableArgumentBuffers = getBool("metalrender.feature.argbuf", enableArgumentBuffers);
         enableProgrammableBlending = getBool("metalrender.feature.oit", enableProgrammableBlending);
 
+        terrainPath = System.getProperty("metalrender.terrainPath", terrainPath).toLowerCase(java.util.Locale.ROOT);
+        switch (terrainPath) {
+            case "vertex" -> enableMeshShaders = false;
+            case "mesh" -> enableMeshShaders = true;
+            default -> terrainPath = "auto";
+        }
         if (enableMeshShaders && com.pebbles_boon.metalrender.nativebridge.MetalHardwareChecker.supportsMeshShaders()) {
             enableIndirectCommandBuffers = true;
         }
     }
 
-    private static boolean getBool(String key, boolean def) {
+    public static boolean getBool(String key, boolean def) {
         String v = System.getProperty(key);
         if (v == null)
             return def;

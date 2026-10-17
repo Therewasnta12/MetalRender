@@ -1331,6 +1331,16 @@ public class MetalRenderSettingsScreen extends Screen {
         tog("Argument Buffers", config.enableArgumentBuffers, v -> config.enableArgumentBuffers = v);
         tog("Indirect CMD Buffers", config.enableIndirectCommandBuffers, v -> config.enableIndirectCommandBuffers = v);
         tog("Mesh Shaders", config.enableMeshShaders, v -> config.enableMeshShaders = v);
+        cyc("Terrain Path", config.terrainPath, () -> {
+            config.terrainPath = switch (config.terrainPath) {
+                case "auto" -> "vertex";
+                case "vertex" -> "mesh";
+                default -> "auto";
+            };
+            System.setProperty("metalrender.terrainPath", config.terrainPath);
+            config.loadFeatureFlags();
+            rebuild();
+        });
         tog("Programmable Blending", config.enableProgrammableBlending, v -> config.enableProgrammableBlending = v);
         tog("Cluster Frustum Culling", config.enableClusterFrustumCulling,
                 v -> config.enableClusterFrustumCulling = v);
