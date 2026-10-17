@@ -73,6 +73,14 @@ tasks.withType(JavaCompile).configureEach {
     options.release = 25
     options.compilerArgs += ['--enable-preview']
 }
+tasks.register('compileShaders', Exec) {
+    inputs.dir('src/main/resources/native/shaders')
+    outputs.file('src/main/resources/shaders.metallib')
+    commandLine 'bash', "${projectDir}/compile_shaders.sh"
+}
+tasks.named('processResources') {
+    dependsOn 'compileShaders'
+}
     jar {
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
         from('src/main/resources/native') {
