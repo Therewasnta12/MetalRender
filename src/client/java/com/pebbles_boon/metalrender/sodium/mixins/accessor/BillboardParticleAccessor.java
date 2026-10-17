@@ -43,4 +43,7 @@ public interface BillboardParticleAccessor {
 
     @Invoker("getV1")
     float metalrender$invokeGetMaxV();
+
+    @Invoker("getLayer")
+    SingleQuadParticle.Layer metalrender$invokeGetLayer();
 }

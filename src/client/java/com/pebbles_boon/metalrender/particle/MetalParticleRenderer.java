@@ -5,6 +5,7 @@ import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.backend.metal.MetalTexture;
 import com.pebbles_boon.metalrender.backend.MetalRenderer;
 import com.pebbles_boon.metalrender.nativebridge.NativeBridge;
+import com.pebbles_boon.metalrender.performance.MetalRenderProfiler;
 import com.pebbles_boon.metalrender.render.MetalTextureManager;
 import com.pebbles_boon.metalrender.render.MetalWorldRenderer;
 import com.pebbles_boon.metalrender.sodium.mixins.accessor.BillboardParticleAccessor;
@@ -18,8 +19,8 @@ import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.particle.Particle;
-import net.minecraft.client.particle.ParticleEngine;
 import net.minecraft.client.particle.SingleQuadParticle;
+import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.core.BlockPos;
@@ -33,7 +34,8 @@ import org.lwjgl.opengl.GL11;
 public class MetalParticleRenderer {
     private static final int VERTEX_STRIDE = 32;
     private static final int MAX_PARTICLE_VERTICES = 65536 * 6;
-    private static final int MAX_PARTICLES_PER_FRAME = 65536;
+    private static final int MAX_PARTICLES_PER_FRAME = 32768;
+    private static final double MAX_PARTICLE_DISTANCE_SQ = 160.0 * 160.0;
     private long device;
     private boolean active;
     private int frameCount;
@@ -48,6 +50,9 @@ public class MetalParticleRenderer {
 
     private final ArrayList<CapturedParticle> capturedParticlePool = new ArrayList<>();
     private int count = 0;
+    private int culledCount = 0;
+    private long captureNs = 0;
+    private Frustum frustum;
     private static final int TEXTURE_CACHE_SIZE = 2048;
     private static final long TEXTURE_UNCACHED = Long.MIN_VALUE;
     private final long[] textureCache = new long[TEXTURE_CACHE_SIZE];
@@ -99,24 +104,20 @@ public class MetalParticleRenderer {
         return active;
     }
 
-    public void capture(ParticleEngine engine, Camera camera, float delta) {
+    public void capture(Frustum frustum, Camera camera, float delta) {
         if (!active)
             return;
         count = 0;
-        try {
-            collect(engine, camera, delta);
-        } catch (Exception e) {
-            if (frameCount < 5) {
-                MetalLogger.error("particle cap fail: %s", e.getMessage());
-                e.printStackTrace();
-            }
-        }
+        culledCount = 0;
+        captureNs = 0;
+        this.frustum = frustum;
     }
 
     public void captureParticleList(Queue<? extends Particle> particles,
             Camera camera, float delta) {
         if (!active || particles == null)
             return;
+        long t0 = System.nanoTime();
         double camX = camera.position().x;
         double camY = camera.position().y;
         double camZ = camera.position().z;
@@ -144,12 +145,24 @@ public class MetalParticleRenderer {
                 continue;
             if (!(p instanceof SingleQuadParticle bp))
                 continue;
+            if (frustum != null && !frustum.isVisible(p.getBoundingBox())) {
+                culledCount++;
+                continue;
+            }
 
             if (inWater) {
                 int hash = System.identityHashCode(p);
                 if ((hash & 7) > 1) {
                     continue;
                 }
+            }
+            ParticleAccessor pa = (ParticleAccessor) p;
+            double dx = pa.metalrender$getX() - camX;
+            double dy = pa.metalrender$getY() - camY;
+            double dz = pa.metalrender$getZ() - camZ;
+            if (dx * dx + dy * dy + dz * dz > MAX_PARTICLE_DISTANCE_SQ) {
+                culledCount++;
+                continue;
             }
             captured++;
             CapturedParticle cp;
@@ -160,7 +173,6 @@ public class MetalParticleRenderer {
                 capturedParticlePool.add(cp);
             }
             count++;
-            ParticleAccessor pa = (ParticleAccessor) p;
             BillboardParticleAccessor bpa = (BillboardParticleAccessor) bp;
             cp.x = (float) (Mth.lerp(delta, pa.metalrender$getLastX(),
                     pa.metalrender$getX()) -
@@ -183,13 +195,22 @@ public class MetalParticleRenderer {
             cp.zRotation = Mth.lerp(delta, bpa.metalrender$getLastZRotation(),
                     bpa.metalrender$getZRotation());
             var sprite = bpa.metalrender$getSprite();
+            cp.atlasId = null;
+            cp.translucent = true;
+            try {
+                SingleQuadParticle.Layer layer = bpa.metalrender$invokeGetLayer();
+                if (layer != null) {
+                    cp.atlasId = layer.textureAtlasLocation();
+                    cp.translucent = layer.translucent();
+                }
+            } catch (Throwable ignored) {
+            }
             if (sprite != null) {
-
                 cp.minU = bpa.metalrender$invokeGetMinU();
                 cp.maxU = bpa.metalrender$invokeGetMaxU();
                 cp.minV = bpa.metalrender$invokeGetMinV();
                 cp.maxV = bpa.metalrender$invokeGetMaxV();
-                if (sprite.atlasLocation() != null) {
+                if (cp.atlasId == null && sprite.atlasLocation() != null) {
                     cp.atlasId = sprite.atlasLocation();
                 }
             } else {
@@ -198,9 +219,14 @@ public class MetalParticleRenderer {
                 cp.minV = 0;
                 cp.maxV = 1;
             }
-
-            cp.light = camLight;
+            int packedLight = camLight;
+            try {
+                packedLight = pa.metalrender$invokeGetLightCoords(delta);
+            } catch (Throwable ignored) {
+            }
+            cp.light = packedLight;
         }
+        captureNs += System.nanoTime() - t0;
         if (frameCount < 5 && captured > 0) {
             MetalLogger.info("captured %d billboard particles", captured);
 
@@ -216,17 +242,22 @@ public class MetalParticleRenderer {
         }
     }
 
-    private void collect(ParticleEngine manager, Camera camera, float delta) {
-    }
-
     public void render(long ctx) {
         if (!active || ctx == 0 || device == 0)
             return;
         if (count == 0) {
+            MetalRenderProfiler.getInstance().recordParticles(0, culledCount, captureNs);
+            culledCount = 0;
+            captureNs = 0;
             frameCount++;
             return;
         }
+        long buildStartNs = System.nanoTime();
         buildParticleGeometry();
+        MetalRenderProfiler.getInstance().recordParticles(count, culledCount,
+                captureNs + System.nanoTime() - buildStartNs);
+        culledCount = 0;
+        captureNs = 0;
         if (vtxCount == 0 || pendingDrawCount == 0) {
             count = 0;
             frameCount++;
@@ -283,7 +314,15 @@ public class MetalParticleRenderer {
             ParticleDrawCommand cmd = pendingDrawPool.get(_di);
             if (cmd.vertexCount <= 0)
                 continue;
-            if (cmd.glTextureId != 0) {
+            if (MetalRenderClient.isBackendMode() && cmd.atlasId != null) {
+                long metalTex = backendTextureHandle(cmd.atlasId);
+                if (metalTex == 0)
+                    metalTex = fallbackBlockAtlas;
+                if (metalTex != 0 && metalTex != lastBoundTex) {
+                    NativeBridge.nBindEntityTexture(ctx, metalTex);
+                    lastBoundTex = metalTex;
+                }
+            } else if (cmd.glTextureId != 0) {
                 long metalTex = getOrCreateMetalTexture(cmd.glTextureId, cmd.atlasId);
                 if (metalTex != 0 && metalTex != lastBoundTex) {
                     NativeBridge.nBindEntityTexture(ctx, metalTex);
@@ -321,57 +360,55 @@ public class MetalParticleRenderer {
         if (camera == null)
             return;
         Quaternionf camRot = camera.rotation();
-        int currentGlTexId = -1;
-        Identifier currentAtlasId = null;
-        int batchStartVertex = 0;
-        int batchVertexCount = 0;
-        for (int _pi = 0; _pi < count; _pi++) {
-            CapturedParticle cp = capturedParticlePool.get(_pi);
-            if (vtxCount + 6 > MAX_PARTICLE_VERTICES)
-                break;
-            int glTexId = 0;
-            if (cp.atlasId != null) {
-                glTexId = getGlTextureIdForAtlas(cp.atlasId);
-            }
-            if (glTexId != currentGlTexId && batchVertexCount > 0) {
-                ParticleDrawCommand cmd;
-                if (pendingDrawCount < pendingDrawPool.size()) {
-                    cmd = pendingDrawPool.get(pendingDrawCount);
-                } else {
-                    cmd = new ParticleDrawCommand();
-                    pendingDrawPool.add(cmd);
+        for (int pass = 0; pass < 2; pass++) {
+            boolean translucentPass = pass == 1;
+            int currentGlTexId = -1;
+            Identifier currentAtlasId = null;
+            int batchStartVertex = vtxCount;
+            int batchVertexCount = 0;
+            for (int _pi = 0; _pi < count; _pi++) {
+                CapturedParticle cp = capturedParticlePool.get(_pi);
+                if (cp.translucent != translucentPass)
+                    continue;
+                if (vtxCount + 6 > MAX_PARTICLE_VERTICES)
+                    break;
+                boolean atlasChanged = batchVertexCount > 0 &&
+                        !java.util.Objects.equals(cp.atlasId, currentAtlasId);
+                if (atlasChanged) {
+                    addDrawCommand(batchStartVertex, batchVertexCount, currentGlTexId, currentAtlasId);
+                    batchStartVertex = vtxCount;
+                    batchVertexCount = 0;
                 }
-                cmd.startVertex = batchStartVertex;
-                cmd.vertexCount = batchVertexCount;
-                cmd.glTextureId = currentGlTexId;
-                cmd.atlasId = currentAtlasId;
-                pendingDrawCount++;
-                batchStartVertex = vtxCount;
-                batchVertexCount = 0;
+                if (batchVertexCount == 0 || atlasChanged) {
+                    currentAtlasId = cp.atlasId;
+                    currentGlTexId = cp.atlasId != null ? getGlTextureIdForAtlas(cp.atlasId) : 0;
+                }
+                buildBillboardQuad(cp, camRot);
+                batchVertexCount += 6;
             }
-            currentGlTexId = glTexId;
-            currentAtlasId = cp.atlasId;
-            buildBillboardQuad(cp, camRot);
-            batchVertexCount += 6;
-        }
-        if (batchVertexCount > 0) {
-            ParticleDrawCommand cmd;
-            if (pendingDrawCount < pendingDrawPool.size()) {
-                cmd = pendingDrawPool.get(pendingDrawCount);
-            } else {
-                cmd = new ParticleDrawCommand();
-                pendingDrawPool.add(cmd);
+            if (batchVertexCount > 0) {
+                addDrawCommand(batchStartVertex, batchVertexCount, currentGlTexId, currentAtlasId);
             }
-            cmd.startVertex = batchStartVertex;
-            cmd.vertexCount = batchVertexCount;
-            cmd.glTextureId = currentGlTexId;
-            cmd.atlasId = currentAtlasId;
-            pendingDrawCount++;
         }
         if (frameCount < 5 && vtxCount > 0) {
             MetalLogger.info("built %d particle verts in %d batches", vtxCount,
                     pendingDrawCount);
         }
+    }
+
+    private void addDrawCommand(int startVertex, int vertexCount, int glTextureId, Identifier atlasId) {
+        ParticleDrawCommand cmd;
+        if (pendingDrawCount < pendingDrawPool.size()) {
+            cmd = pendingDrawPool.get(pendingDrawCount);
+        } else {
+            cmd = new ParticleDrawCommand();
+            pendingDrawPool.add(cmd);
+        }
+        cmd.startVertex = startVertex;
+        cmd.vertexCount = vertexCount;
+        cmd.glTextureId = glTextureId;
+        cmd.atlasId = atlasId;
+        pendingDrawCount++;
     }
 
     private void buildBillboardQuad(CapturedParticle cp, Quaternionf camRot) {
@@ -596,6 +633,7 @@ public class MetalParticleRenderer {
     }
 
     private static class CapturedParticle {
+        boolean translucent;
         float x, y, z;
         float scale;
         float red, green, blue, alpha;

@@ -3,6 +3,7 @@ package com.pebbles_boon.metalrender.sodium.mixins.accessor;
 import net.minecraft.client.particle.Particle;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
+import org.spongepowered.asm.mixin.gen.Invoker;
 
 @Mixin(Particle.class)
 public interface ParticleAccessor {
@@ -23,4 +24,7 @@ public interface ParticleAccessor {
 
     @Accessor("zo")
     double metalrender$getLastZ();
+
+    @Invoker("getLightCoords")
+    int metalrender$invokeGetLightCoords(float partialTick);
 }
