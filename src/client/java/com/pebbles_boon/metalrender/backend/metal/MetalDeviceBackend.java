@@ -43,6 +43,7 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     private final Map<Integer, Long> depthStates = new HashMap<>();
     private final Map<RenderPipeline, MetalCompiledPipeline> pipelines = new HashMap<>();
     private boolean closed;
+    private static String libraryError;
 
     MetalDeviceBackend(long window, ShaderSource shaderSource) throws BackendCreationException {
         try {
@@ -58,10 +59,11 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
         this.queue = handles[1];
         MetalNative.nBackendAttach(device, queue);
         this.deviceName = MetalNative.nDeviceName(device);
+        libraryError = null;
         this.library = loadLibrary(device);
         if (library == 0) {
             releaseCore(0, 0);
-            throw new BackendCreationException("Metal shader library failed: " + MetalNative.nLastError());
+            throw new BackendCreationException("Metal shader library failed: " + libraryError);
         }
         this.ctx = MetalNative.nCtxCreate(device, queue, library);
         if (ctx == 0) {
@@ -93,17 +95,23 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     private static long loadLibrary(long device) {
         try (InputStream in = MetalDeviceBackend.class.getResourceAsStream("/shaders.metallib")) {
             if (in == null) {
+                libraryError = "/shaders.metallib not found on classpath";
                 return 0;
             }
             byte[] bytes = in.readAllBytes();
             ByteBuffer data = MemoryUtil.memAlloc(bytes.length);
             try {
                 data.put(bytes).flip();
-                return MetalNative.nLibraryCreate(device, data, bytes.length);
+                long lib = MetalNative.nLibraryCreate(device, data, bytes.length);
+                if (lib == 0) {
+                    libraryError = MetalNative.nLastError();
+                }
+                return lib;
             } finally {
                 MemoryUtil.memFree(data);
             }
         } catch (IOException e) {
+            libraryError = "reading /shaders.metallib failed: " + e;
             return 0;
         }
     }
