@@ -11,6 +11,7 @@
     "GameRendererMixin",
     "VanillaSectionCompileTaskMixin",
     "WorldRendererTerrainMixin",
+    "LevelReadyMixin",
     "EntityRenderMixin",
     "ParticleCaptureMixin",
     "WorldRendererBlitMixin",

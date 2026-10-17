@@ -1038,9 +1038,14 @@ public class MetalWorldRenderer {
         frameCount++;
     }
 
+    private static boolean levelLoading() {
+        Minecraft mc = Minecraft.getInstance();
+        return mc == null || mc.player == null;
+    }
+
     public void renderTerrainOpaque() {
         long ib = externalIndexBuffer;
-        if (ib == 0 || !metalActive()) {
+        if (ib == 0 || !metalActive() || levelLoading()) {
             return;
         }
         drawInBackendPass("metalrender_terrain", (encoder, width, height) -> {
@@ -1058,7 +1063,7 @@ public class MetalWorldRenderer {
     }
 
     public void renderTerrainTranslucent() {
-        if (externalIndexBuffer == 0 || !metalActive()) {
+        if (externalIndexBuffer == 0 || !metalActive() || levelLoading()) {
             return;
         }
         drawInBackendPass("metalrender_water", NativeBridge::nWaterExternalDraw);
