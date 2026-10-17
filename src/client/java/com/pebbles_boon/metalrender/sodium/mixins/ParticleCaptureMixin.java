@@ -36,7 +36,7 @@ public class ParticleCaptureMixin {
         MetalParticleRenderer particleRenderer = worldRenderer.getParticleRenderer();
         if (particleRenderer == null || !particleRenderer.isActive())
             return;
-        particleRenderer.capture((ParticleEngine) (Object) this, camera, tickDelta);
+        particleRenderer.capture(frustum, camera, tickDelta);
         try {
             ParticleManagerAccessor accessor = (ParticleManagerAccessor) (Object) this;
             Map<ParticleRenderType, ParticleGroup<?>> particlesMap = accessor.metalrender$getParticles();
