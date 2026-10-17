@@ -135,7 +135,13 @@ final class MetalNative {
             int srcX, int srcY, long dst, int dstSlice, int dstMip, int dstX, int dstY, int width,
             int height);
 
-    static native boolean nCtxPresent(long ctx, long layer, long sourceTexture);
+    static native boolean nCtxPresent(long ctx, long layer, long sourceTexture, long mainDepth);
+
+    static native boolean nCtxClearDepthFolded(long ctx, double depth);
+
+    static native void nSetPacedPresent(boolean enabled);
+
+    static native long[] nBackendStats();
 
     static native long nCtxSubmit(long ctx, boolean frameEnd);
 

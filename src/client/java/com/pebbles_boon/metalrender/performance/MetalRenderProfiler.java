@@ -116,6 +116,13 @@ public final class MetalRenderProfiler {
     private volatile double lastUploadMs;
     private volatile double lastGpuMs;
 
+    private long totalTierA;
+    private long totalTierB;
+    private long totalTierC;
+    private int censusRows;
+    private long previousPresents;
+    private long previousSkipped;
+    private long previousBackendNs;
     private long lastLogTimeMs;
     private long lastCsvEmitMs;
     private long lastSnapshotUpdateMs;
@@ -125,13 +132,13 @@ public final class MetalRenderProfiler {
             + "builder_busy_pct,builder_imm_busy_pct,builder_bg_busy_pct,rebuild_count,rebuild_reasons,"
             + "blit_wait_ms,blit_bind_ms,blit_copy_ms,blit_quad_ms,blit_gl_gpu_ms,"
             + "native_wait_render_ms,native_cgl_bind_ms,"
-            + "pass_opaque_ms,pass_cutout_ms,pass_translucent_ms,pass_hiz_ms,pass_composite_ms,"
+            + "pass_terrain_ms,pass_translucent_ms,pass_gui_ms,pass_present_ms,pass_other_ms,"
             + "mega_pages,mega_used_bytes,mega_allocs,mega_frees,"
             + "compress_attempts,compress_success,compress_rejects,"
             + "quads_per_column,resident_quad_bytes,drawn_quads,gpu_ms,"
             + "frames_in_sec,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_max_ms,process_cpu_pct,rss_mb,"
             + "swap_ms,swap_to_swap_ms,limiter_ms,atlas_readback_ms,atlas_diff_ms,atlas_upload_ms,"
-            + "sections_loaded,sections_beyond_circle,cull_failsafe_frames,vanilla_compile_ms,compress_verify_bad,sections_walk_visible,cave_walk_ms,cave_walks,cave_walk_reuses,scene";
+            + "sections_loaded,sections_beyond_circle,cull_failsafe_frames,vanilla_compile_ms,compress_verify_bad,sections_walk_visible,cave_walk_ms,cave_walks,cave_walk_reuses,encoders_per_frame,presents_per_sec,skipped_presents,quads_tier_a,quads_tier_b,quads_tier_c,arena_live_mb,arena_capacity_mb,arena_free_mb,arena_holes,arena_high_mb,arena_bytes_per_quad,quad_verify_bad,cull_oracle_diff,scene";
 
     private MetalRenderProfiler() {
     }
@@ -447,6 +454,29 @@ public final class MetalRenderProfiler {
         long failsafe = Integer.toUnsignedLong((int) nativeDouble(() -> NativeBridge.nGetCullFailsafeFrames()));
         long failsafeDelta = (failsafe - previousCullFailsafe) & 0xffffffffL;
         previousCullFailsafe = failsafe;
+        long[] backend = nativeLongs(3, out -> com.pebbles_boon.metalrender.backend.metal.MetalBackendStats.read(out));
+        long nowNs = System.nanoTime();
+        double presentsPerSec = 0.0;
+        long skippedDelta = Math.max(0, backend[2] - previousSkipped);
+        if (previousBackendNs != 0 && nowNs > previousBackendNs) {
+            presentsPerSec = (backend[1] - previousPresents) * 1e9 / (nowNs - previousBackendNs);
+        }
+        previousPresents = backend[1];
+        previousSkipped = backend[2];
+        previousBackendNs = nowNs;
+        long[] arena = nativeLongs(10, out -> NativeBridge.nArenaStats(out));
+        long tierA = com.pebbles_boon.metalrender.render.chunk.QuadTiers.COUNT_A.sumThenReset();
+        long tierB = com.pebbles_boon.metalrender.render.chunk.QuadTiers.COUNT_B.sumThenReset();
+        long tierC = com.pebbles_boon.metalrender.render.chunk.QuadTiers.COUNT_C.sumThenReset();
+        totalTierA += tierA;
+        totalTierB += tierB;
+        totalTierC += tierC;
+        if (com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher.quadCensus() && (++censusRows % 10) == 0) {
+            long total = Math.max(1, totalTierA + totalTierB + totalTierC);
+            MetalLogger.info("CENSUS tierA=%.2f%% tierB=%.2f%% tierC=%.2f%% quads=%d reasons=%s",
+                    100.0 * totalTierA / total, 100.0 * totalTierB / total, 100.0 * totalTierC / total, total,
+                    com.pebbles_boon.metalrender.render.chunk.QuadTiers.reasonSnapshot());
+        }
         StringBuilder sb = new StringBuilder(1024);
         sb.append(tsMs).append(',').append(fmt(frameMs)).append(',').append(fmt(meshMs)).append(',')
                 .append(fmt(uploadMs)).append(',').append(fmt(cullMs)).append(',').append(fmt(scanOut)).append(',')
@@ -484,6 +514,15 @@ public final class MetalRenderProfiler {
                 .append(com.pebbles_boon.metalrender.render.chunk.CustomChunkMesher.getCompressVerifyBad())
                 .append(',').append(Math.min(caveSectionsVisible, access.meshCount)).append(',').append(fmt(caveWalkMs))
                 .append(',').append(caveWalkCount).append(',').append(caveWalkReuseCount)
+                .append(',').append(backend[0]).append(',').append(fmt(presentsPerSec)).append(',')
+                .append(skippedDelta)
+                .append(',').append(tierA).append(',').append(tierB).append(',').append(tierC)
+                .append(',').append(fmt(arena[0] / 1048576.0)).append(',').append(fmt(arena[1] / 1048576.0))
+                .append(',').append(fmt(arena[2] / 1048576.0)).append(',').append(arena[3])
+                .append(',').append(fmt(arena[4] / 1048576.0))
+                .append(',').append(fmt(arena[5] > 0 ? (double) arena[6] / arena[5] : 0.0))
+                .append(',').append(com.pebbles_boon.metalrender.render.chunk.QuadTiers.VERIFY_BAD.sum())
+                .append(',').append(fmt(arena[8] / 1000.0))
                 .append(',').append('"').append(scene).append('"').append('\n');
         csvQueue.offer(sb.toString());
         if (chunksDrawn > 0) addSceneRow(pct, gpuMs, atlasOut, nativeDrawPrep, meshMs, uploadMs,
@@ -634,7 +673,7 @@ public final class MetalRenderProfiler {
                 case "rss_mb" -> fmt(rss);
                 case "scene" -> "\"" + scene + "\"";
                 case "rebuild_reasons", "compress_rejects" -> "\"\"";
-                case "pass_opaque_ms", "pass_cutout_ms", "pass_translucent_ms", "pass_hiz_ms", "pass_composite_ms" -> "-1";
+                case "pass_terrain_ms", "pass_translucent_ms", "pass_gui_ms", "pass_present_ms", "pass_other_ms" -> "-1";
                 default -> "0";
             });
         }
