@@ -330,6 +330,7 @@ public class CustomChunkMesher {
             0);
     private final java.util.concurrent.atomic.AtomicInteger vertexCountAtomic = new java.util.concurrent.atomic.AtomicInteger(
             0);
+    private final java.util.concurrent.atomic.AtomicInteger connectivityDirtyGeneration = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.AtomicInteger meshUpdateGeneration = new java.util.concurrent.atomic.AtomicInteger(
             0);
 
@@ -348,6 +349,44 @@ public class CustomChunkMesher {
             0);
     private static final java.util.concurrent.atomic.AtomicInteger COMPRESS_SUCCESS = new java.util.concurrent.atomic.AtomicInteger(
             0);
+    private static final boolean CIRCULAR_BUILD_RANGE = MetalRenderConfig.getBool("metalrender.circularDistance", true);
+    private record BuildRange(int x, int z, int distance) {}
+    private volatile BuildRange buildRange;
+
+    public void updateBuildRange(int x, int z, int distance) {
+        BuildRange previous = buildRange;
+        if (previous == null || previous.x != x || previous.z != z || previous.distance != distance) {
+            buildRange = new BuildRange(x, z, distance);
+        }
+    }
+
+    private boolean outsideBuildRange(int x, int z) {
+        BuildRange range = buildRange;
+        return CIRCULAR_BUILD_RANGE && range != null && !net.minecraft.server.level.ChunkTrackingView.isInViewDistance(
+                range.x, range.z, range.distance, x, z);
+    }
+
+    public LongOpenHashSet getConnectivityDirtySnapshot() {
+        synchronized (dirtyKeys) {
+            return new LongOpenHashSet(dirtyKeys);
+        }
+    }
+
+    public ChunkMeshData[] getConnectivityMeshSnapshot() {
+        synchronized (meshCache) {
+            return meshCache.values().toArray(new ChunkMeshData[0]);
+        }
+    }
+
+    private static final boolean COMPRESS_BYTE_ORDER = MetalRenderConfig.getBool("metalrender.compressByteOrder", true);
+    private static final boolean VERIFY_COMPRESS = MetalRenderConfig.getBool("metalrender.verifyCompress", false);
+    private static final java.util.concurrent.atomic.AtomicInteger COMPRESS_VERIFIED = new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicLong COMPRESS_VERIFY_BAD = new java.util.concurrent.atomic.AtomicLong();
+
+    public static long getCompressVerifyBad() {
+        return COMPRESS_VERIFY_BAD.get();
+    }
+
     private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> COMPRESS_REJECTS = new java.util.concurrent.ConcurrentHashMap<>();
     private static final java.util.concurrent.atomic.AtomicInteger REBUILD_COUNT = new java.util.concurrent.atomic.AtomicInteger(
             0);
@@ -404,9 +443,7 @@ public class CustomChunkMesher {
     public static void noteRebuild(String reason) {
         REBUILD_COUNT.incrementAndGet();
         if (reason != null) {
-            java.util.concurrent.atomic.AtomicInteger c = REBUILD_REASONS.get(reason);
-            if (c != null)
-                c.incrementAndGet();
+            REBUILD_REASONS.computeIfAbsent(reason, k -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
         }
     }
 
@@ -488,8 +525,12 @@ public class CustomChunkMesher {
         this.pendingBlockUpdateNanos.defaultReturnValue(0L);
 
         int processors = Runtime.getRuntime().availableProcessors();
-        this.immediateThreadCount = Math.max(3, Math.min(6, processors / 3 + 1));
-        this.backgroundThreadCount = Math.max(4, Math.min(8, processors - 2));
+        int perf = NativeBridge.isLibLoaded() ? NativeBridge.nGetPerfCoreCount() : -1;
+        if (perf <= 0) perf = Math.max(2, processors / 2);
+        boolean sizedPools = MetalRenderConfig.getBool("metalrender.pool", true);
+        this.immediateThreadCount = sizedPools ? Math.max(1, perf / 2) : Math.max(3, Math.min(6, processors / 3 + 1));
+        this.backgroundThreadCount = sizedPools ? Math.max(1, perf - 1) : Math.max(4, Math.min(8, processors - 2));
+        MetalLogger.info("builder pools: perf=%d immediate=%d background=%d", perf, immediateThreadCount, backgroundThreadCount);
 
         final java.util.concurrent.ThreadFactory immediateFactory = r -> {
             Thread t = new Thread(r, "MetalRender-MeshBuilder-Immediate");
@@ -564,6 +605,8 @@ public class CustomChunkMesher {
         if (world == null)
             return false;
 
+        if (mc.player != null) updateBuildRange(mc.player.chunkPosition().x(), mc.player.chunkPosition().z(), mc.options.renderDistance().get());
+        if (outsideBuildRange(chunkX, chunkZ)) return false;
         long key = packChunkKey(chunkX, chunkY, chunkZ);
         final long genAtSubmit;
         final long globalGenAtSubmit = globalBuildGeneration.get();
@@ -744,6 +787,7 @@ public class CustomChunkMesher {
         if (!newlyDirty) {
             return;
         }
+        connectivityDirtyGeneration.incrementAndGet();
         noteRebuild(reason);
         synchronized (emptyKeys) {
             emptyKeys.remove(key);
@@ -756,14 +800,14 @@ public class CustomChunkMesher {
         }
     }
 
-    public void contentChanged(int cx, int cy, int cz) {
+    public void contentChanged(int cx, int cy, int cz, String source) {
         DIAG_CONTENTCHANGED.incrementAndGet();
         long key = packChunkKey(cx, cy, cz);
         synchronized (variantLock) {
             contentEpochByKey.put(key, contentEpochByKey.get(key) + 1L);
             destroyStashForKeyLocked(key);
         }
-        markDirtyWithReason(cx, cy, cz, "content_changed");
+        markDirtyWithReason(cx, cy, cz, "content_changed:" + source);
     }
 
     public static long hashDataLayer(net.minecraft.world.level.chunk.DataLayer layer) {
@@ -1014,6 +1058,7 @@ public class CustomChunkMesher {
             for (long k : emptyArr)
                 dirtyGeneration.put(k, dirtyGeneration.get(k) + 1L);
         }
+        connectivityDirtyGeneration.incrementAndGet();
         noteRebuildBulk("mark_all_dirty", keys.length + emptyArr.length);
     }
 
@@ -1216,6 +1261,10 @@ public class CustomChunkMesher {
             NativeBridge.nRegisterChunkMeshBatch(toFlush, batchRegData);
             batchRegCount = 0;
         }
+    }
+
+    public long getConnectivityGeneration() {
+        return ((long) meshUpdateGeneration.get() << 32) | Integer.toUnsignedLong(connectivityDirtyGeneration.get());
     }
 
     public int getMeshUpdateGeneration() {
@@ -2439,9 +2488,13 @@ public class CustomChunkMesher {
                 COMPRESS_ATTEMPTS.incrementAndGet();
                 try {
                     ByteBuffer srcDup = vertexHolder.buf.duplicate();
+                    if (COMPRESS_BYTE_ORDER) srcDup.order(ByteOrder.nativeOrder());
                     srcDup.position(0);
                     srcDup.limit(opaqueBytesUncompressed);
                     compressedOpaque = tryCompressOpaqueQuads(srcDup, opaqueQuadCount);
+                    if (compressedOpaque != null && VERIFY_COMPRESS && COMPRESS_VERIFIED.getAndIncrement() < 256) {
+                        COMPRESS_VERIFY_BAD.addAndGet(verifyCompressedQuads(srcDup, compressedOpaque, opaqueQuadCount));
+                    }
                 } catch (Exception ignored) {
                     noteCompressReject("exception");
                     compressedOpaque = null;
@@ -2523,7 +2576,7 @@ public class CustomChunkMesher {
                     opaqueFormat);
             ChunkMeshData old;
             synchronized (dirtyGeneration) {
-                if (isTaskCancelled(key, generation, globalGeneration)) {
+                if (isTaskCancelled(key, generation, globalGeneration) || outsideBuildRange(chunkX, chunkZ)) {
                     NativeBridge.nDestroyBuffer(bufferHandle);
                     return;
                 }
@@ -2594,7 +2647,7 @@ public class CustomChunkMesher {
             recordVisibleLatency(key);
             MetalRenderProfiler.getInstance().incrementMeshesBuilt(1);
             synchronized (dirtyKeys) {
-                dirtyKeys.remove(key);
+                if (dirtyKeys.remove(key)) connectivityDirtyGeneration.incrementAndGet();
             }
         } catch (Exception e) {
             java.io.StringWriter sw = new java.io.StringWriter();
@@ -4387,6 +4440,57 @@ public class CustomChunkMesher {
         return out;
     }
 
+    private static long verifyCompressedQuads(ByteBuffer source, ByteBuffer compressed, int count) {
+        long bad = 0;
+        for (int q = 0; q < count; q++) {
+            int offset = q * QUAD_RECORD_STRIDE;
+            int word0 = compressed.getInt(offset);
+            int word1 = compressed.getInt(offset + 4);
+            int word2 = compressed.getInt(offset + 8);
+            int word3 = compressed.getInt(offset + 12);
+            int bx = word0 & 15, by = (word0 >>> 4) & 15, bz = (word0 >>> 8) & 15;
+            int normal = (word0 >>> 12) & 7;
+            if (normal > 5) {
+                bad++;
+                continue;
+            }
+            int width = ((word0 >>> 16) & 15) + 1;
+            int height = ((word0 >>> 20) & 15) + 1;
+            int x0 = bx * 256, y0 = by * 256, z0 = bz * 256;
+            int x1 = x0, y1 = y0, z1 = z0;
+            int overlay = (word1 >>> 24) & 1;
+            if (normal < 2) {
+                x1 = (bx + width) * 256;
+                z1 = (bz + height) * 256;
+                y0 = y1 = (by + (normal == 1 ? 1 : 0)) * 256;
+            } else if (normal >= 4) {
+                y1 = (by + height) * 256;
+                z1 = (bz + width) * 256;
+                x0 = x1 = (bx + (normal == 5 ? 1 : 0)) * 256 + overlay * (normal == 5 ? 1 : -1);
+            } else {
+                x1 = (bx + width) * 256;
+                y1 = (by + height) * 256;
+                z0 = z1 = (bz + (normal == 3 ? 1 : 0)) * 256 + overlay * (normal == 3 ? 1 : -1);
+            }
+            boolean mismatch = false;
+            for (int corner = 0; corner < 4; corner++) {
+                int x = FACE_VERTS[normal][corner * 3] == 0 ? x0 : x1;
+                int y = FACE_VERTS[normal][corner * 3 + 1] == 0 ? y0 : y1;
+                int z = FACE_VERTS[normal][corner * 3 + 2] == 0 ? z0 : z1;
+                int u = UV_PAT[corner][0] == 0 ? word2 & 65535 : word2 >>> 16;
+                int v = UV_PAT[corner][1] == 0 ? word3 & 65535 : word3 >>> 16;
+                int alpha = ((word0 >>> 15) & 1) == 0 ? 255 : 254;
+                long decoded0 = (x & 65535L) | ((y & 65535L) << 16) | ((z & 65535L) << 32) | ((long) u << 48);
+                long decoded1 = v | ((word1 & 0xffffffL) << 16) | ((long) alpha << 40)
+                        | ((long) (word0 >>> 24) << 48) | ((long) normal << 56);
+                int vertex = q * 4 * VERTEX_STRIDE + corner * VERTEX_STRIDE;
+                if (source.getLong(vertex) != decoded0 || source.getLong(vertex + 8) != decoded1) mismatch = true;
+            }
+            if (mismatch) bad++;
+        }
+        return bad;
+    }
+
     public ChunkMeshData getMesh(int cx, int cy, int cz) {
         long key = packChunkKey(cx, cy, cz);
         synchronized (meshCache) {
@@ -4443,25 +4547,76 @@ public class CustomChunkMesher {
         }
     }
 
+    private static final class ConnectivityScratch {
+        final long[] opaque = new long[64];
+        final long[] visited = new long[64];
+        final int[] stack = new int[4096];
+    }
+
+    private static final ThreadLocal<ConnectivityScratch> CONNECTIVITY_SCRATCH = ThreadLocal.withInitial(ConnectivityScratch::new);
+
     private static long computeVisibilityMask(int[] paddedBlockStates) {
-        long mask = 0L;
-        if (paddedBlockStates == null)
-            return mask;
-        for (int y = 0; y < SECTION_SIZE; y++) {
-            for (int z = 0; z < SECTION_SIZE; z++) {
-                for (int x = 0; x < SECTION_SIZE; x++) {
-                    int pIdx = ((y + PADDED_RADIUS) * PADDED_SIZE + (z + PADDED_RADIUS))
-                            * PADDED_SIZE + (x + PADDED_RADIUS);
-                    if (paddedBlockStates[pIdx] != 0) {
-                        int bit = (y / 4) * 16 + (z / 4) * 4 + (x / 4);
-                        if (bit >= 0 && bit < 64) {
-                            mask |= (1L << bit);
-                        }
+        if (paddedBlockStates == null) return (1L << 36) - 1;
+        long[] opaque = CONNECTIVITY_SCRATCH.get().opaque;
+        Arrays.fill(opaque, 0);
+        int count = 0;
+        for (int y = 0; y < 16; y++) {
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    int padded = ((y + PADDED_RADIUS) * PADDED_SIZE + z + PADDED_RADIUS) * PADDED_SIZE + x + PADDED_RADIUS;
+                    if (padded >= paddedBlockStates.length) continue;
+                    int state = paddedBlockStates[padded];
+                    if (state != 0 && isOpaqueState(state)) {
+                        int cell = y * 256 + z * 16 + x;
+                        opaque[cell >>> 6] |= 1L << cell;
+                        count++;
                     }
                 }
             }
         }
-        return mask;
+        return connectOpenCells(opaque, count);
+    }
+
+    private static long connectOpenCells(long[] opaque, int count) {
+        if (count == 4096) return 0;
+        if (count < 256) return (1L << 36) - 1;
+        ConnectivityScratch scratch = CONNECTIVITY_SCRATCH.get();
+        long[] visited = scratch.visited;
+        int[] stack = scratch.stack;
+        Arrays.fill(visited, 0);
+        long result = 0;
+        for (int start = 0; start < 4096; start++) {
+            if (((opaque[start >>> 6] | visited[start >>> 6]) & (1L << start)) != 0) continue;
+            int top = 0;
+            stack[top++] = start;
+            visited[start >>> 6] |= 1L << start;
+            int faces = 0;
+            while (top > 0) {
+                int cell = stack[--top];
+                int x = cell & 15, z = (cell >>> 4) & 15, y = cell >>> 8;
+                if (y == 0) faces |= 1;
+                if (y == 15) faces |= 2;
+                if (z == 0) faces |= 4;
+                if (z == 15) faces |= 8;
+                if (x == 0) faces |= 16;
+                if (x == 15) faces |= 32;
+                for (int direction = 0; direction < 6; direction++) {
+                    int next = switch (direction) {
+                        case 0 -> y > 0 ? cell - 256 : -1;
+                        case 1 -> y < 15 ? cell + 256 : -1;
+                        case 2 -> z > 0 ? cell - 16 : -1;
+                        case 3 -> z < 15 ? cell + 16 : -1;
+                        case 4 -> x > 0 ? cell - 1 : -1;
+                        default -> x < 15 ? cell + 1 : -1;
+                    };
+                    if (next < 0 || ((opaque[next >>> 6] | visited[next >>> 6]) & (1L << next)) != 0) continue;
+                    visited[next >>> 6] |= 1L << next;
+                    stack[top++] = next;
+                }
+            }
+            for (int face = 0; face < 6; face++) if ((faces & (1 << face)) != 0) result |= (long) faces << (face * 6);
+        }
+        return result;
     }
 
     private static boolean isSectionFullyOccluded(int[] paddedBlockStates) {

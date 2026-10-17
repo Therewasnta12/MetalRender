@@ -19,6 +19,129 @@ public class CullingOrcreator {
     private volatile long lastCapWarnMs;
     private volatile boolean capped;
 
+    private int[] sectionVisits = new int[0];
+    private byte[] sectionQueued = new byte[0];
+    private byte[] sectionExpanded = new byte[0];
+    private byte[] sectionPendingExits = new byte[0];
+    private long[] sectionQueue = new long[0];
+    private long[] sectionReached = new long[0];
+    private int sectionToken;
+    private long[] sectionMasks = new long[0];
+    private static final int[] SECTION_DX = {0, 0, 0, 0, -1, 1};
+    private static final int[] SECTION_DY = {-1, 1, 0, 0, 0, 0};
+    private static final int[] SECTION_DZ = {0, 0, -1, 1, 0, 0};
+
+    private static long sectionKey(int x, int y, int z) {
+        return ((long) (x & 0x3fffff) << 42) | ((long) (y & 0xfffff) << 22) | (z & 0x3fffff);
+    }
+
+    public long[] computeVisibleSections(int camSecX, int camSecY, int camSecZ, int radiusChunks,
+            int minSecY, int maxSecY, it.unimi.dsi.fastutil.longs.Long2LongMap masks) {
+        return walkSections(camSecX, camSecY, camSecZ, radiusChunks, minSecY, maxSecY, masks, false);
+    }
+
+    public long[] computeVisibleLoadedSections(int camSecX, int camSecY, int camSecZ, int radiusChunks,
+            int minSecY, int maxSecY, it.unimi.dsi.fastutil.longs.Long2LongMap masks) {
+        if (camSecY < minSecY || camSecY > maxSecY || radiusChunks < 0) return new long[0];
+        int low = camSecY, high = camSecY;
+        boolean loaded = false;
+        var entries = it.unimi.dsi.fastutil.longs.Long2LongMaps.fastIterator(masks);
+        while (entries.hasNext()) {
+            long key = entries.next().getLongKey();
+            int x = (int) (key >> 42), y = (int) (key << 22 >> 44), z = (int) (key << 42 >> 42);
+            if (Math.abs((long) x - camSecX) <= radiusChunks && Math.abs((long) z - camSecZ) <= radiusChunks
+                    && y >= minSecY && y <= maxSecY) {
+                low = Math.min(low, y);
+                high = Math.max(high, y);
+                loaded = true;
+            }
+        }
+        if (!loaded) return new long[0];
+        return walkSections(camSecX, camSecY, camSecZ, radiusChunks,
+                Math.max(minSecY, low - 1), Math.min(maxSecY, high + 1), masks, true);
+    }
+
+    private long[] walkSections(int camSecX, int camSecY, int camSecZ, int radiusChunks,
+            int minSecY, int maxSecY, it.unimi.dsi.fastutil.longs.Long2LongMap masks, boolean loadedOnly) {
+        if (radiusChunks < 0 || camSecY < minSecY || camSecY > maxSecY) return new long[0];
+        long width = 2L * radiusChunks + 1;
+        long height = (long) maxSecY - minSecY + 1;
+        if (height <= 0 || width > 46340 || height > Integer.MAX_VALUE / (width * width)) return new long[0];
+        int w = (int) width, h = (int) height, size = w * w * h;
+        if (sectionVisits.length < size) {
+            sectionVisits = new int[size];
+            sectionMasks = new long[size];
+            sectionQueued = new byte[size];
+            sectionExpanded = new byte[size];
+            sectionPendingExits = new byte[size];
+            sectionQueue = new long[size];
+            sectionReached = new long[size];
+            sectionToken = 0;
+        }
+        if (++sectionToken == (1 << 26)) {
+            java.util.Arrays.fill(sectionVisits, 0);
+            sectionToken = 1;
+        }
+        int stamp = sectionToken << 6;
+        int x0 = camSecX - radiusChunks, z0 = camSecZ - radiusChunks;
+        java.util.Arrays.fill(sectionMasks, 0, size, (1L << 36) - 1);
+        var entries = it.unimi.dsi.fastutil.longs.Long2LongMaps.fastIterator(masks);
+        while (entries.hasNext()) {
+            var entry = entries.next();
+            long key = entry.getLongKey();
+            int x = (int) (key >> 42), y = (int) (key << 22 >> 44), z = (int) (key << 42 >> 42);
+            if (x >= x0 && x < x0 + w && z >= z0 && z < z0 + w && y >= minSecY && y <= maxSecY) {
+                sectionMasks[((x - x0) * h + y - minSecY) * w + z - z0] = entry.getLongValue() | Long.MIN_VALUE;
+            }
+        }
+        int startIndex = (radiusChunks * h + camSecY - minSecY) * w + radiusChunks;
+        long cameraKey = sectionKey(camSecX, camSecY, camSecZ);
+        sectionVisits[startIndex] = stamp | 63;
+        sectionExpanded[startIndex] = 0;
+        sectionPendingExits[startIndex] = 63;
+        sectionQueued[startIndex] = 1;
+        sectionQueue[0] = cameraKey;
+        int reached = 0;
+        if (!loadedOnly || sectionMasks[startIndex] < 0) sectionReached[reached++] = cameraKey;
+        int head = 0, tail = size == 1 ? 0 : 1, queued = 1;
+        while (queued > 0) {
+            if ((head & 1023) == 0 && Thread.currentThread().isInterrupted()) return new long[0];
+            long key = sectionQueue[head];
+            if (++head == size) head = 0;
+            queued--;
+            int x = (int) (key >> 42), y = (int) (key << 22 >> 44), z = (int) (key << 42 >> 42);
+            int index = ((x - x0) * h + y - minSecY) * w + z - z0;
+            sectionQueued[index] = 0;
+            int freshExits = sectionPendingExits[index] & ~sectionExpanded[index];
+            sectionExpanded[index] |= (byte) freshExits;
+            for (int direction = 0; direction < 6; direction++) {
+                if ((freshExits & (1 << direction)) == 0) continue;
+                int nx = x + SECTION_DX[direction], ny = y + SECTION_DY[direction], nz = z + SECTION_DZ[direction];
+                if (nx < x0 || nx >= x0 + w || nz < z0 || nz >= z0 + w || ny < minSecY || ny > maxSecY) continue;
+                int nextIndex = ((nx - x0) * h + ny - minSecY) * w + nz - z0;
+                int nextIncoming = 1 << (direction ^ 1);
+                boolean first = (sectionVisits[nextIndex] >>> 6) != sectionToken;
+                if (first) {
+                    sectionVisits[nextIndex] = stamp;
+                    sectionExpanded[nextIndex] = 0;
+                    sectionPendingExits[nextIndex] = 0;
+                    sectionQueued[nextIndex] = 0;
+                    if (!loadedOnly || sectionMasks[nextIndex] < 0) sectionReached[reached++] = sectionKey(nx, ny, nz);
+                } else if ((sectionVisits[nextIndex] & nextIncoming) != 0) continue;
+                sectionVisits[nextIndex] |= nextIncoming;
+                int nextExits = (int) (sectionMasks[nextIndex] >>> ((direction ^ 1) * 6)) & 63;
+                sectionPendingExits[nextIndex] |= (byte) nextExits;
+                if (sectionQueued[nextIndex] == 0 && (nextExits & ~sectionExpanded[nextIndex]) != 0) {
+                    sectionQueue[tail] = sectionKey(nx, ny, nz);
+                    if (++tail == size) tail = 0;
+                    queued++;
+                    sectionQueued[nextIndex] = 1;
+                }
+            }
+        }
+        return java.util.Arrays.copyOf(sectionReached, reached);
+    }
+
     private static long clusterKey(int x, int z) {
         return ((long) x << 32) | (z & 0xFFFFFFFFL);
     }
