@@ -19,7 +19,7 @@ public class LevelCloudWeatherMixin {
             return false;
         }
         MetalWorldRenderer wr = MetalRenderClient.getWorldRenderer();
-        return wr != null && wr.metalActive();
+        return wr != null && wr.captureActive();
     }
 
     @Inject(method = "addCloudsPass(Lcom/mojang/blaze3d/framegraph/FrameGraphBuilder;"

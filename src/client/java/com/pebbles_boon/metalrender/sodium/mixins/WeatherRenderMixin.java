@@ -15,7 +15,7 @@ public class WeatherRenderMixin {
         if (!MetalRenderClient.isEnabled())
             return;
         MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
-        if (worldRenderer != null && worldRenderer.metalActive()) {
+        if (worldRenderer != null && worldRenderer.captureActive()) {
             ci.cancel();
         }
     }

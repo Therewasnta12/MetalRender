@@ -16,7 +16,7 @@ public class CloudRenderMixin {
             return;
         }
         MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
-        if (worldRenderer != null && worldRenderer.metalActive()) {
+        if (worldRenderer != null && worldRenderer.captureActive()) {
             ci.cancel();
         }
     }
@@ -27,7 +27,7 @@ public class CloudRenderMixin {
             return;
         }
         MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
-        if (worldRenderer != null && worldRenderer.metalActive()) {
+        if (worldRenderer != null && worldRenderer.captureActive()) {
             ci.cancel();
         }
     }
