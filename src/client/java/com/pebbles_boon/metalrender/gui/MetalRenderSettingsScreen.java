@@ -34,6 +34,8 @@ import net.minecraft.util.ARGB;
 
 public class MetalRenderSettingsScreen extends Screen {
 
+    private static final Identifier LOGO = Identifier.fromNamespaceAndPath("metalrender", "textures/metalrender_transparent.png");
+
     private static final class GlassBackdrop implements AutoCloseable {
         private static final Identifier TEXTURE = Identifier.fromNamespaceAndPath("metalrender", "settings_glass");
         private static final RenderPipeline SURFACE = pipeline(RenderPipelines.GUI_TEXTURED, "glass");
@@ -608,7 +610,10 @@ public class MetalRenderSettingsScreen extends Screen {
     }
 
     private void drawHeader(GuiGraphicsExtractor ctx, net.minecraft.client.gui.Font font) {
-        int tx = px + 18;
+        int lh = HDR_H - 14;
+        int lw = lh * 1374 / 1145;
+        ctx.blit(RenderPipelines.GUI_TEXTURED, LOGO, px + 14, py + 7, 0.0f, 0.0f, lw, lh, lw, lh, 0xFFFFFFFF);
+        int tx = px + 14 + lw + 8;
         int ty = py + 16;
         String gpu = MetalHardwareChecker.getDeviceName();
         boolean gpuOk = gpu != null && !gpu.isEmpty() && !gpu.equals("Unknown GPU");
@@ -619,14 +624,14 @@ public class MetalRenderSettingsScreen extends Screen {
 
         int dotsW = 10 + font.width("Sodium") + 14 + 10 + font.width("Metal") + 14
                 + 10 + font.width(gpuLabel) + 8;
-        int maxTitleW = pw - 36 - dotsW;
+        int maxTitleW = pw - (tx - px) - 18 - dotsW;
         if (maxTitleW < 60) {
             maxTitleW = 60;
 
             gpuLabel = "GPU";
             dotsW = 10 + font.width("Sodium") + 14 + 10 + font.width("Metal") + 14
                     + 10 + font.width(gpuLabel) + 8;
-            maxTitleW = Math.max(40, pw - 36 - dotsW);
+            maxTitleW = Math.max(40, pw - (tx - px) - 18 - dotsW);
         }
         String title = "MetalRender";
         String version = "Settings  \u2022  v2.0.0";

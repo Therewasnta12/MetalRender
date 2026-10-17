@@ -8,6 +8,7 @@
   ],
   "name": "MetalRender",
   "description": "funny MacOS mod",
+  "icon": "assets/metalrender/textures/logo/metalrender_logo.png",
   "environment": "client",
   "entrypoints": {
     "preLaunch": [
