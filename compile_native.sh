@@ -13,6 +13,7 @@ xcrun -sdk macosx metal -c $SHADER_DIR/oit_transparency.metal -o $SHADER_DIR/oit
 xcrun -sdk macosx metal -c $SHADER_DIR/cull_and_encode.metal -o $SHADER_DIR/cull_and_encode.air
 xcrun -sdk macosx metal -c $SHADER_DIR/translucency_sort.metal -o $SHADER_DIR/translucency_sort.air
 xcrun -sdk macosx metal -c $SHADER_DIR/motion_vectors.metal -o $SHADER_DIR/motion_vectors.air
+xcrun -sdk macosx metal -c $SHADER_DIR/families.metal -o $SHADER_DIR/families.air
 
 echo "compelling shaders"
 xcrun -sdk macosx metal -std=metal3.0 -c $SHADER_DIR/mesh_terrain.metal -o $SHADER_DIR/mesh_terrain.air
@@ -28,6 +29,7 @@ xcrun -sdk macosx metallib \
     $SHADER_DIR/translucency_sort.air \
     $SHADER_DIR/motion_vectors.air \
     $SHADER_DIR/mesh_terrain.air \
+    $SHADER_DIR/families.air \
     -o src/main/resources/shaders.metallib
 echo "Shaders compiled to src/main/resources/shaders.metallib"
 
@@ -42,8 +44,10 @@ clang++ -O3 -std=c++17 -dynamiclib \
     -I"src/main/resources/native" \
     src/main/resources/native/metalrender.mm \
     src/main/resources/native/meshshader.mm \
+    src/main/resources/native/metal_backend.mm \
     -o src/main/resources/libmetalrender_debug_v2.dylib
 
+rm -f src/main/resources/libmetalrender.dylib
 cp src/main/resources/libmetalrender_debug_v2.dylib src/main/resources/libmetalrender.dylib
 
 echo "Native library compiled to src/main/resources/libmetalrender_debug_v2.dylib"
