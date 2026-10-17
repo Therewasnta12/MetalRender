@@ -78,6 +78,8 @@
 #define MR_FS_GUI 0
 #define MR_FS_POSITION_TEX_COLOR 1
 #define MR_FS_PANORAMA 2
+#define MR_FS_GLASS 3
+#define MR_FS_GLASS_BLUR 4
 #define MR_FS_TEXT 10
 #define MR_FS_TEXT_BACKGROUND 11
 #define MR_FS_TEXT_INTENSITY 12

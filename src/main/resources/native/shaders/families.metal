@@ -23,7 +23,7 @@ constant bool HAS_LINE_WIDTH [[function_constant(MR_FC_HAS_LINE_WIDTH)]];
 constant bool HAS_PROJECTION [[function_constant(MR_FC_HAS_PROJECTION)]];
 constant bool HAS_DYNAMIC_TRANSFORMS [[function_constant(MR_FC_HAS_DYNAMIC_TRANSFORMS)]];
 
-constant bool GUI_TEX2D = FS_VARIANT == MR_FS_POSITION_TEX_COLOR;
+constant bool GUI_TEX2D = FS_VARIANT == MR_FS_POSITION_TEX_COLOR || FS_VARIANT == MR_FS_GLASS;
 constant bool GUI_CUBE = FS_VARIANT == MR_FS_PANORAMA;
 constant bool GUI_SAMPLER0 = GUI_TEX2D || GUI_CUBE;
 
@@ -182,6 +182,8 @@ vertex VOut gui_vertex(VIn in [[stage_in]],
   } else {
     o.color = mr_color(in);
     o.uv0 = mr_uv0(in);
+    if (FS_VARIANT == MR_FS_GLASS)
+      o.uv1 = o.position.xy / o.position.w * float2(0.5, -0.5) + 0.5;
   }
   return o;
 }
@@ -195,6 +197,40 @@ fragment float4 gui_fragment(VOut in [[stage_in]],
     return cube0.sample(s0, in.dir);
   }
   float4 color = in.color;
+  if (FS_VARIANT == MR_FS_GLASS) {
+    float packed = round(in.color.a * 255.0);
+    bool pane = packed >= 128.0;
+    float scale = max(1.0, packed - (pane ? 128.0 : 0.0));
+    float2 size = max(float2(1.0), round(in.color.rg * 255.0) * scale);
+    float radius = min(round(in.color.b * 255.0), min(size.x, size.y) * 0.5);
+    float2 local = (in.uv0 - 0.5) * size;
+    float2 q = abs(local) - size * 0.5 + radius;
+    float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+    float aa = max(fwidth(distance), 0.15);
+    float coverage = 1.0 - smoothstep(-aa, aa, distance);
+    if (coverage <= 0.0) discard_fragment();
+    float2 normal = q.x > q.y ? float2(sign(local.x), 0.0) : float2(0.0, sign(local.y));
+    if (length(max(q, 0.0)) > 0.001)
+      normal = normalize(max(q, 0.0)) * sign(local);
+    float rim = exp(-abs(distance + 0.65) * 2.5);
+    float inner = exp(-abs(distance + 1.8) * 1.5);
+    float light = dot(normal, normalize(float2(-0.55, -0.83)));
+    float2 texel = 1.0 / float2(tex0.get_width(), tex0.get_height());
+    float2 refractedUv = in.uv1 + normal * texel * rim * 0.8;
+    float3 scene = tex0.sample(s0, refractedUv).rgb;
+    if (pane) {
+      float3 body = mix(scene, float3(0.10, 0.13, 0.17), 0.14);
+      body += rim * (0.12 + 0.25 * max(light, 0.0));
+      body -= inner * max(-light, 0.0) * 0.05;
+      return float4(body, coverage);
+    }
+    float highlight = rim * (0.25 + 0.65 * max(light, 0.0));
+    float shade = inner * max(-light, 0.0) * 0.17;
+    float alpha = (0.035 + highlight + shade) * coverage;
+    float3 lens = mix(scene, float3(0.94, 0.98, 1.0), 0.7);
+    lens = mix(lens, float3(0.07, 0.10, 0.14), shade * 3.0);
+    return float4(lens, alpha);
+  }
   if (GUI_TEX2D) {
     color = tex0.sample(s0, in.uv0) * in.color;
   }
@@ -450,6 +486,19 @@ fragment float4 post_fragment(VOut in [[stage_in]],
                               constant MRGlobals &globals [[buffer(MR_SLOT_GLOBALS), function_constant(POST_FS_GLOBALS)]],
                               constant MRLightmapInfo &lightmapInfo [[buffer(MR_SLOT_LIGHTMAP_INFO), function_constant(POST_FS_LIGHTMAP)]]) {
   float2 uv = in.uv0;
+  if (FS_VARIANT == MR_FS_GLASS_BLUR) {
+    float2 step = 1.0 / float2(inTex.get_width(), inTex.get_height());
+    float3 scene = inTex.sample(inSampler, uv).rgb * 0.25;
+    scene += inTex.sample(inSampler, uv + float2(step.x, 0.0)).rgb * 0.125;
+    scene += inTex.sample(inSampler, uv - float2(step.x, 0.0)).rgb * 0.125;
+    scene += inTex.sample(inSampler, uv + float2(0.0, step.y)).rgb * 0.125;
+    scene += inTex.sample(inSampler, uv - float2(0.0, step.y)).rgb * 0.125;
+    scene += inTex.sample(inSampler, uv + step).rgb * 0.0625;
+    scene += inTex.sample(inSampler, uv - step).rgb * 0.0625;
+    scene += inTex.sample(inSampler, uv + float2(step.x, -step.y)).rgb * 0.0625;
+    scene += inTex.sample(inSampler, uv + float2(-step.x, step.y)).rgb * 0.0625;
+    return float4(scene, 1.0);
+  }
   if (POST_FS_LIGHTMAP) {
     return mr_lightmap_color(lightmapInfo, uv);
   }

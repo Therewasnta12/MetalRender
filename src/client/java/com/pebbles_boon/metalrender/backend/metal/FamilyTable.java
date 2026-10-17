@@ -208,6 +208,12 @@ public final class FamilyTable {
     }
 
     static int fragmentVariant(RenderPipeline pipeline) {
+        if ("metalrender".equals(pipeline.getFragmentShader().getNamespace())) {
+            if ("core/glass".equals(pipeline.getFragmentShader().getPath()))
+                return 3;
+            if ("core/glass_blur".equals(pipeline.getFragmentShader().getPath()))
+                return 4;
+        }
         if (!isVanilla(pipeline.getFragmentShader())) {
             return -1;
         }

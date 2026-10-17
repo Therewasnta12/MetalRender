@@ -2,8 +2,10 @@ package com.pebbles_boon.metalrender.sodium.mixins;
 
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.pebbles_boon.metalrender.MetalRenderClient;
+import com.pebbles_boon.metalrender.gui.MetalRenderSettingsScreen;
 import com.pebbles_boon.metalrender.render.MetalWorldRenderer;
 import net.minecraft.client.DeltaTracker;
+import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -11,6 +13,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(targets = "net.minecraft.client.renderer.GameRenderer", remap = false)
 public abstract class GameRendererMixin {
+    @Inject(method = "render", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/gui/render/GuiRenderer;render(Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V"),
+            require = 1)
+    private void metalrender$captureSettingsBackdrop(DeltaTracker deltaTracker, boolean renderLevel, CallbackInfo ci) {
+        if (Minecraft.getInstance().screen instanceof MetalRenderSettingsScreen settings)
+            settings.captureGlassBackdrop();
+    }
+
     @Inject(method = "renderLevel", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/systems/" +
             "CommandEncoder;clearDepthTexture(Lcom/mojang/" +
             "blaze3d/textures/GpuTexture;D)V", remap = false), require = 0)

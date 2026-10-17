@@ -1,11 +1,20 @@
 package com.pebbles_boon.metalrender.gui;
 
+import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.textures.FilterMode;
+import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.textures.GpuSampler;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.config.MetalRenderConfig;
 import com.pebbles_boon.metalrender.gui.components.MetalOptionSlider;
 import com.pebbles_boon.metalrender.nativebridge.MetalHardwareChecker;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.OptionalInt;
 import net.minecraft.client.CloudStatus;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.OptionInstance;
@@ -16,10 +25,120 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.MouseButtonEvent;
+import net.minecraft.client.renderer.RenderPipelines;
+import net.minecraft.client.renderer.texture.AbstractTexture;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ParticleStatus;
+import net.minecraft.util.ARGB;
 
 public class MetalRenderSettingsScreen extends Screen {
+
+    private static final class GlassBackdrop implements AutoCloseable {
+        private static final Identifier TEXTURE = Identifier.fromNamespaceAndPath("metalrender", "settings_glass");
+        private static final RenderPipeline SURFACE = pipeline(RenderPipelines.GUI_TEXTURED, "glass");
+        private static final RenderPipeline BLUR = pipeline(RenderPipelines.ENTITY_OUTLINE_BLIT, "glass_blur");
+        private GpuTexture scene, blurred;
+        private GpuTextureView sceneView, blurredView;
+        private final AbstractTexture textureAlias = new AbstractTexture() {
+            @Override
+            public GpuTexture getTexture() { return blurred; }
+
+            @Override
+            public GpuTextureView getTextureView() { return blurredView; }
+
+            @Override
+            public GpuSampler getSampler() {
+                return RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+
+        private static RenderPipeline pipeline(RenderPipeline source, String name) {
+            var builder = RenderPipeline.builder()
+                    .withLocation(Identifier.fromNamespaceAndPath("metalrender", "pipeline/" + name))
+                    .withVertexShader(source.getVertexShader())
+                    .withFragmentShader(Identifier.fromNamespaceAndPath("metalrender", "core/" + name))
+                    .withVertexFormat(source.getVertexFormat(), source.getVertexFormatMode())
+                    .withColorTargetState(source.getColorTargetState())
+                    .withDepthStencilState(java.util.Optional.ofNullable(source.getDepthStencilState())).withCull(false)
+                    .withSampler(name.equals("glass") ? "Sampler0" : "InSampler");
+            for (var uniform : source.getUniforms())
+                builder.withUniform(uniform.name(), uniform.type());
+            return builder.build();
+        }
+
+        void prepare() {
+            var mc = Minecraft.getInstance();
+            if (!MetalRenderClient.isBackendMode() || mc.level == null)
+                return;
+            var main = mc.getMainRenderTarget();
+            int width = Math.max(1, (main.width + 3) / 4);
+            int height = Math.max(1, (main.height + 3) / 4);
+            if (scene != null && scene.getWidth(0) == width && scene.getHeight(0) == height)
+                return;
+            close();
+            var device = RenderSystem.getDevice();
+            int usage = GpuTexture.USAGE_TEXTURE_BINDING | GpuTexture.USAGE_RENDER_ATTACHMENT;
+            scene = device.createTexture("Settings glass scene", usage, main.getColorTexture().getFormat(), width, height, 1, 1);
+            blurred = device.createTexture("Settings glass frost", usage, main.getColorTexture().getFormat(), width, height, 1, 1);
+            sceneView = device.createTextureView(scene);
+            blurredView = device.createTextureView(blurred);
+            mc.getTextureManager().register(TEXTURE, textureAlias);
+        }
+
+        void capture() {
+            if (sceneView == null)
+                return;
+            var encoder = RenderSystem.getDevice().createCommandEncoder();
+            var sampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
+            try (var pass = encoder.createRenderPass(() -> "Settings glass downsample", sceneView, OptionalInt.empty())) {
+                pass.setPipeline(RenderPipelines.ENTITY_OUTLINE_BLIT);
+                RenderSystem.bindDefaultUniforms(pass);
+                pass.bindTexture("InSampler", Minecraft.getInstance().getMainRenderTarget().getColorTextureView(), sampler);
+                pass.draw(0, 3);
+            }
+            try (var pass = encoder.createRenderPass(() -> "Settings glass frost", blurredView, OptionalInt.empty())) {
+                pass.setPipeline(BLUR);
+                RenderSystem.bindDefaultUniforms(pass);
+                pass.bindTexture("InSampler", sceneView, sampler);
+                pass.draw(0, 3);
+            }
+        }
+
+        boolean draw(GuiGraphicsExtractor ctx, int x, int y, int width, int height, int radius) {
+            return drawLens(ctx, x, y, width, height, radius, true);
+        }
+
+        boolean drawLens(GuiGraphicsExtractor ctx, int x, int y, int width, int height, int radius, boolean pane) {
+            if (blurredView == null)
+                return false;
+            int scale = Math.max(1, (Math.max(width, height) + 254) / 255);
+            int metadata = ((scale + (pane ? 128 : 0)) << 24)
+                    | (Math.min(255, Math.round((float) width / scale)) << 16)
+                    | (Math.min(255, Math.round((float) height / scale)) << 8)
+                    | Math.min(255, radius);
+            ctx.blit(SURFACE, TEXTURE, x, y, 0.0f, 0.0f, width, height, width, height, metadata);
+            return true;
+        }
+
+        @Override
+        public void close() {
+            if (blurredView != null)
+                Minecraft.getInstance().getTextureManager().release(TEXTURE);
+            if (sceneView != null) sceneView.close();
+            if (blurredView != null) blurredView.close();
+            if (scene != null) scene.close();
+            if (blurred != null) blurred.close();
+            sceneView = null;
+            blurredView = null;
+            scene = null;
+            blurred = null;
+        }
+    }
 
     private static int C_BG_TOP = 0xFF0B0B0D;
     private static int C_BG_BOTTOM = 0xFF131318;
@@ -54,13 +173,14 @@ public class MetalRenderSettingsScreen extends Screen {
     private static int C_PILL_OFF_STROKE = 0xFF4A4A52;
     private static int C_ACCENT = 0xFF007AFF;
     private static int C_ACCENT_GRAD = 0xFF3FA9FF;
+    private static int C_ACCENT_TEXT = 0xFF19232D;
     private static int C_SCROLLTHUMB = 0xFF5A5A66;
     private static int C_SCROLLTHUMB_HOVER = 0xFF007AFF;
     private static int C_GLASS_DOT_ON = 0xFF34C759;
     private static int C_GLASS_DOT_OFF = 0xFF48484F;
 
-    private static final int PANEL_W = 780;
-    private static final int PANEL_H = 540;
+    private static final int PANEL_W = 700;
+    private static final int PANEL_H = 460;
     private static final int HDR_H = 52;
     private static final int TAB_H = 44;
     private static final int FOOT_H = 16;
@@ -68,7 +188,7 @@ public class MetalRenderSettingsScreen extends Screen {
     private static final int CARD_GAP = 8;
     private static final int SEC_H = 36;
     private static final int HPAD = 18;
-    private static final int SIDEBAR_W = 168;
+    private static final int SIDEBAR_W = 144;
     private static final int SIDEBAR_GAP = 12;
     private static final int PILL_W = 44;
     private static final int PILL_H = 24;
@@ -106,6 +226,19 @@ public class MetalRenderSettingsScreen extends Screen {
     private float animTabX = -1;
     private int animTabW = 0;
     private float animSideY = -1;
+    private long sidebarAnimationTime;
+    private final GlassBackdrop glassBackdrop = new GlassBackdrop();
+    private final Map<String, ToggleMotion> toggleMotions = new HashMap<>();
+
+    private static final class ToggleMotion {
+        float progress;
+        long time;
+
+        ToggleMotion(boolean on, long now) {
+            progress = on ? 1.0f : 0.0f;
+            time = now;
+        }
+    }
     private int totalContentHeight = 0;
 
     private int px, py, pw, ph;
@@ -151,6 +284,7 @@ public class MetalRenderSettingsScreen extends Screen {
             C_PILL_OFF = 0xFF2A3442;
             C_PILL_OFF_STROKE = 0xFF4A5A6E;
             C_ACCENT = acc;
+            C_ACCENT_TEXT = accentText(acc);
             C_ACCENT_GRAD = accGrad;
             C_SCROLLTHUMB = 0xFF6A7A8E;
             C_SCROLLTHUMB_HOVER = acc;
@@ -168,10 +302,10 @@ public class MetalRenderSettingsScreen extends Screen {
         C_HEADER = t.header;
         C_HEADER_GRADIENT = t.headerGrad;
         C_TAB_PILL_BG = t.tabPillBg;
-        C_TAB_PILL_ACTIVE = t.tabPillActive;
+        C_TAB_PILL_ACTIVE = t == UiTheme.LIQUID_GLASS ? 0x6855789E : t.tabPillActive;
         C_TAB_PILL_HOVER = t.tabPillHover;
         C_TAB_TEXT = t.textSec;
-        C_TAB_TEXT_ACTIVE = t.isLight ? 0xFF4D3A36 : 0xFF0B0B0D;
+        C_TAB_TEXT_ACTIVE = t.textPri;
         C_CARD = t.card;
         C_CARD_HOVER = t.cardHover;
         C_CARD_STROKE = t.cardStroke;
@@ -186,11 +320,19 @@ public class MetalRenderSettingsScreen extends Screen {
         C_PILL_OFF = t.pillOff;
         C_PILL_OFF_STROKE = t.pillOffStroke;
         C_ACCENT = t.accent;
+        C_ACCENT_TEXT = accentText(t.accent);
         C_ACCENT_GRAD = t.accentGrad;
         C_SCROLLTHUMB = t.scrollThumb;
         C_SCROLLTHUMB_HOVER = t.scrollThumbHover;
         C_GLASS_DOT_ON = t.glassDotOn;
         C_GLASS_DOT_OFF = t.glassDotOff;
+    }
+
+    private static int accentText(int color) {
+        float luminance = 0.2126f * ARGB.srgbToLinearChannel(ARGB.red(color))
+                + 0.7152f * ARGB.srgbToLinearChannel(ARGB.green(color))
+                + 0.0722f * ARGB.srgbToLinearChannel(ARGB.blue(color));
+        return luminance > 0.179f ? 0xFF19232D : 0xFFF9FCFF;
     }
 
     private int pendingRenderDist;
@@ -311,8 +453,8 @@ public class MetalRenderSettingsScreen extends Screen {
     }
 
     private void layout() {
-        pw = Math.min(PANEL_W, width - 16);
-        ph = Math.min(PANEL_H, height - 16);
+        pw = Math.min(PANEL_W, width - 24);
+        ph = Math.min(PANEL_H, height - 24);
         px = (width - pw) / 2;
         py = (height - ph) / 2;
         sx = px + HPAD;
@@ -348,6 +490,8 @@ public class MetalRenderSettingsScreen extends Screen {
     @Override
     public void extractRenderState(GuiGraphicsExtractor ctx, int mx, int my, float delta) {
         var font = getFont();
+        if (activeTheme == UiTheme.LIQUID_GLASS)
+            glassBackdrop.prepare();
 
         drawBackground(ctx);
         drawPanel(ctx);
@@ -367,6 +511,25 @@ public class MetalRenderSettingsScreen extends Screen {
             drawCustomHexLabels(ctx, font);
 
         super.extractRenderState(ctx, mx, my, delta);
+    }
+
+    @Override
+    protected void extractBlurredBackground(GuiGraphicsExtractor ctx) {
+    }
+
+    @Override
+    protected void extractMenuBackground(GuiGraphicsExtractor ctx) {
+    }
+
+    public void captureGlassBackdrop() {
+        if (activeTheme == UiTheme.LIQUID_GLASS)
+            glassBackdrop.capture();
+    }
+
+    @Override
+    public void removed() {
+        glassBackdrop.close();
+        super.removed();
     }
 
     private void drawCustomHexLabels(GuiGraphicsExtractor ctx, net.minecraft.client.gui.Font font) {
@@ -404,8 +567,7 @@ public class MetalRenderSettingsScreen extends Screen {
 
     private void drawBackground(GuiGraphicsExtractor ctx) {
         if (activeTheme == UiTheme.LIQUID_GLASS) {
-            ctx.fillGradient(0, 0, width, height, C_BG_TOP, C_BG_BOTTOM);
-            ctx.fill(0, 0, width, height, C_SCRIM);
+            ctx.fill(0, 0, width, height, 0x100A1018);
             return;
         }
         ctx.fillGradient(0, 0, width, height, C_BG_TOP, C_BG_BOTTOM);
@@ -432,33 +594,17 @@ public class MetalRenderSettingsScreen extends Screen {
         boolean light = activeTheme.isLight;
         if (activeTheme == UiTheme.LIQUID_GLASS) {
             int pr = 22;
-            fillRounded(ctx, px - 3, py - 2, pw + 6, ph + 6, 0x35000000, pr + 2);
-            fillRounded(ctx, px, py, pw, ph, C_PANEL, pr);
-            drawRoundedOutline(ctx, px, py, pw, ph, C_PANEL_INNER_STROKE, pr);
-            ctx.fill(px + pr, py, px + pw - pr, py + 1, 0x66FFFFFF);
-            ctx.fillGradient(px + 8, py + 2, px + pw - 8, py + 30, 0x26FFFFFF, 0x00FFFFFF);
+            fillRounded(ctx, px, py + 2, pw, ph, 0x28000000, pr);
+            if (!glassBackdrop.draw(ctx, px, py, pw, ph, pr)) {
+                fillRounded(ctx, px, py, pw, ph, C_PANEL, pr);
+                drawRoundedOutline(ctx, px, py, pw, ph, 0x48FFFFFF, pr);
+            }
             return;
         }
-        if (light) {
-            fillRounded(ctx, px - 3, py - 3, pw + 6, ph + 6, 0x204D3A36, 14);
-            fillRounded(ctx, px - 1, py - 1, pw + 2, ph + 2, 0x154D3A36, 12);
-        } else {
-            ctx.fill(px - 3, py - 3, px + pw + 3, py + ph + 3, 0x50000000);
-            ctx.fill(px - 1, py - 1, px + pw + 1, py + ph + 1, 0x20000000);
-        }
-        ctx.fill(px, py, px + pw, py + ph, C_PANEL);
-        ctx.fill(px, py, px + pw, py + 1, C_PANEL_INNER_STROKE);
-        int sideStroke = light ? 0x14000000 : 0x14FFFFFF;
-        ctx.fill(px, py + 1, px + 1, py + ph, sideStroke);
-        ctx.fill(px + pw - 1, py + 1, px + pw, py + ph, sideStroke);
-        ctx.fill(px, py + ph - 1, px + pw, py + ph, sideStroke);
-        ctx.fill(px + 1, py + 1, px + pw - 1, py + 2, C_ACCENT);
-        ctx.fillGradient(px, py + 2, px + pw, py + 48, C_PANEL_HIGHLIGHT, 0x00FFFFFF);
-        if (activeTheme == UiTheme.PASTEL) {
-            fillRounded(ctx, px + 24, py + 12, 64, 14, 0x08FFFFFF, 7);
-            fillRounded(ctx, px + pw - 88, py + 18, 36, 10, 0x06FFFFFF, 5);
-        }
-        ctx.fill(px + 1, py + ph - 1, px + pw - 1, py + ph, light ? 0x10000000 : 0x18FFFFFF);
+        fillRounded(ctx, px - 2, py + 3, pw + 4, ph + 2, light ? 0x1450473D : 0x30000000, 22);
+        fillRounded(ctx, px, py, pw, ph, C_PANEL, 20);
+        drawRoundedOutline(ctx, px, py, pw, ph, C_PANEL_BORDER, 20);
+        ctx.fill(px + 20, py + 1, px + pw - 20, py + 2, C_PANEL_INNER_STROKE);
     }
 
     private void drawHeader(GuiGraphicsExtractor ctx, net.minecraft.client.gui.Font font) {
@@ -532,8 +678,8 @@ public class MetalRenderSettingsScreen extends Screen {
 
     private void renderSidebar(GuiGraphicsExtractor ctx, int mx, int my) {
         var font = getFont();
-        int btnH = 36;
-        int gap = 6;
+        int btnH = sidebarButtonHeight();
+        int gap = sidebarButtonGap();
         int radius = activeTheme.isLight ? 12 : 10;
         fillRounded(ctx, sx, sy, sw, sh, C_TAB_PILL_BG, radius);
         drawRoundedOutline(ctx, sx, sy, sw, sh, activeTheme.isLight ? 0x14000000 : 0x14FFFFFF, radius);
@@ -542,7 +688,10 @@ public class MetalRenderSettingsScreen extends Screen {
         int targetY = sy + 8 + selectedTab * (btnH + gap);
         if (animSideY < 0)
             animSideY = targetY;
-        animSideY += (targetY - animSideY) * 0.25f;
+        long now = System.nanoTime();
+        float elapsed = sidebarAnimationTime == 0 ? 0 : Math.min(0.05f, (now - sidebarAnimationTime) / 1_000_000_000f);
+        sidebarAnimationTime = now;
+        animSideY += (targetY - animSideY) * (1.0f - (float) Math.exp(-elapsed * 16.0f));
 
         fillRounded(ctx, sx + 4, (int) animSideY, sw - 8, btnH, C_TAB_PILL_ACTIVE, 8);
         ctx.fill(sx + 8, (int) animSideY + btnH - 1, sx + sw - 8, (int) animSideY + btnH,
@@ -559,7 +708,7 @@ public class MetalRenderSettingsScreen extends Screen {
             String icon = i < TAB_ICONS.length ? TAB_ICONS[i] : "\u25CF";
             int iconCol = sel ? C_TAB_TEXT_ACTIVE : (hov ? C_TEXT_ACCENT : C_TEXT_SEC);
             ctx.text(font, Component.literal(icon), bx + 10, by + (btnH - 14) / 2, iconCol, false);
-            int tc = sel ? C_TAB_TEXT_ACTIVE : (hov ? C_TEXT_ACCENT : (activeTheme.isLight ? 0xFF4D3A36 : C_TEXT_PRI));
+            int tc = sel ? C_TAB_TEXT_ACTIVE : (hov ? C_TEXT_ACCENT : C_TEXT_PRI);
             ctx.text(font, Component.literal(TABS[i]), bx + 26, by + (btnH - 9) / 2, tc, false);
             if (sel)
                 ctx.text(font, Component.literal("\u203A"), bx + bw - 12, by + (btnH - 9) / 2, C_TAB_TEXT_ACTIVE,
@@ -578,22 +727,79 @@ public class MetalRenderSettingsScreen extends Screen {
         renderSidebar(ctx, mx, my);
     }
 
+    private int sidebarButtonGap() {
+        return sh < 240 ? 4 : 6;
+    }
+
+    private int sidebarButtonHeight() {
+        return Math.max(16, Math.min(36, (sh - 16 - (TABS.length - 1) * sidebarButtonGap()) / TABS.length));
+    }
+
     private void fillRounded(GuiGraphicsExtractor ctx, int x, int y, int w, int h, int col, int r) {
         if (w <= 0 || h <= 0)
             return;
-        ctx.fill(x + r, y, x + w - r, y + h, col);
-        ctx.fill(x, y + r, x + w, y + h - r, col);
-        ctx.fill(x + 1, y + 1, x + r, y + r, col);
-        ctx.fill(x + w - r, y + 1, x + w - 1, y + r, col);
-        ctx.fill(x + 1, y + h - r, x + r, y + h - 1, col);
-        ctx.fill(x + w - r, y + h - r, x + w - 1, y + h - 1, col);
+        fillGlassRounded(ctx, x, y, w, h, col, r);
     }
 
     private void drawRoundedOutline(GuiGraphicsExtractor ctx, int x, int y, int w, int h, int col, int r) {
+        if (r > 1 && w > 0 && h > 0) {
+            int radius = Math.min(r, Math.min(w, h) / 2);
+            for (int row = 0; row < radius; row++) {
+                float outer = glassInset(radius, row);
+                float inner = row == 0 ? w / 2.0f : 1.0f + glassInset(radius - 1, row - 1);
+                fillGlassSpan(ctx, x, y + row, outer, inner, col);
+                fillGlassSpan(ctx, x, y + row, w - inner, w - outer, col);
+                fillGlassSpan(ctx, x, y + h - row - 1, outer, inner, col);
+                fillGlassSpan(ctx, x, y + h - row - 1, w - inner, w - outer, col);
+            }
+            ctx.fill(x, y + radius, x + 1, y + h - radius, col);
+            ctx.fill(x + w - 1, y + radius, x + w, y + h - radius, col);
+            return;
+        }
         ctx.fill(x + r, y, x + w - r, y + 1, col);
         ctx.fill(x + r, y + h - 1, x + w - r, y + h, col);
         ctx.fill(x, y + r, x + 1, y + h - r, col);
         ctx.fill(x + w - 1, y + r, x + w, y + h - r, col);
+    }
+
+    private static float glassInset(int radius, int row) {
+        float distance = Math.max(0, radius - row - 0.5f);
+        return radius - (float) Math.sqrt(Math.max(0, radius * radius - distance * distance));
+    }
+
+    private static void fillGlassSpan(GuiGraphicsExtractor ctx, int x, int y, float from, float to, int col) {
+        if (to <= from)
+            return;
+        int left = (int) Math.floor(from);
+        int right = (int) Math.ceil(to) - 1;
+        if (right > left + 1)
+            ctx.fill(x + left + 1, y, x + right, y + 1, col);
+        int alpha = col >>> 24;
+        int leftAlpha = Math.round(alpha * Math.max(0, Math.min(left + 1.0f, to) - from));
+        ctx.fill(x + left, y, x + left + 1, y + 1, (col & 0x00FFFFFF) | (leftAlpha << 24));
+        if (right != left) {
+            int rightAlpha = Math.round(alpha * (to - right));
+            ctx.fill(x + right, y, x + right + 1, y + 1, (col & 0x00FFFFFF) | (rightAlpha << 24));
+        }
+    }
+
+    public static void fillGlassRounded(GuiGraphicsExtractor ctx, int x, int y, int w, int h, int col, int r) {
+        if (w <= 0 || h <= 0)
+            return;
+        int radius = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+        for (int row = 0; row < radius; row++) {
+            float inset = glassInset(radius, row);
+            fillGlassSpan(ctx, x, y + row, inset, w - inset, col);
+            fillGlassSpan(ctx, x, y + h - row - 1, inset, w - inset, col);
+        }
+        ctx.fill(x, y + radius, x + w, y + h - radius, col);
+    }
+
+    public static void drawGlassLens(GuiGraphicsExtractor ctx, int x, int y, int w, int h, int radius) {
+        if (Minecraft.getInstance().screen instanceof MetalRenderSettingsScreen settings
+                && settings.glassBackdrop.drawLens(ctx, x, y, w, h, radius, false))
+            return;
+        fillGlassRounded(ctx, x, y, w, h, 0x30FFFFFF, radius);
     }
 
     private int sliderWidthFor(Row r) {
@@ -695,7 +901,14 @@ public class MetalRenderSettingsScreen extends Screen {
             if (maxThemeTextW < 40)
                 maxThemeTextW = 40;
             String themeName = truncateLabel(font, th.displayName, maxThemeTextW);
-            String variant = (th.isLight ? "Light" : "Dark") + " \u2022 Rounded " + th.cardRadius;
+            String variant = switch (th) {
+                case LIQUID_GLASS -> "Frosted \u00b7 cool highlights";
+                case AMBER -> "Warm graphite \u00b7 gold";
+                case PASTEL -> "Soft ivory \u00b7 sage";
+                case CRIMSON -> "Deep graphite \u00b7 rose";
+                case LAVENDER -> "Muted slate \u00b7 lilac";
+                case CUSTOM -> "Your own colours";
+            };
             String themeSub = truncateLabel(font, variant, maxThemeTextW);
             ctx.text(font, Component.literal(themeName), tx, y + 12, C_TEXT_PRI, false);
             ctx.text(font, Component.literal(themeSub), tx, y + 26, C_TEXT_SEC, false);
@@ -707,7 +920,7 @@ public class MetalRenderSettingsScreen extends Screen {
             if (sel) {
                 fillRounded(ctx, stateX, stateY, stateW, 18, C_ACCENT, 9);
                 drawRoundedOutline(ctx, stateX, stateY, stateW, 18, 0x1AFFFFFF, 9);
-                ctx.centeredText(font, Component.literal(state), stateX + stateW / 2, stateY + 4, 0xFFFFFFFF);
+                ctx.centeredText(font, Component.literal(state), stateX + stateW / 2, stateY + 4, C_ACCENT_TEXT);
             } else {
                 fillRounded(ctx, stateX, stateY, stateW, 18, th.isLight ? 0x14E8D8C8 : 0x14FFFFFF, 9);
                 drawRoundedOutline(ctx, stateX, stateY, stateW, 18, th.isLight ? 0x14000000 : 0x14FFFFFF, 9);
@@ -725,17 +938,19 @@ public class MetalRenderSettingsScreen extends Screen {
         else if (activeTheme.isLight)
             cardRadius = activeTheme.cardRadius;
         int baseCol = hovered ? C_CARD_HOVER : C_CARD;
-        fillRounded(ctx, x, y, w, CARD_H, baseCol, cardRadius);
-        drawRoundedOutline(ctx, x, y, w, CARD_H, C_CARD_STROKE, cardRadius);
-        ctx.fill(x + 8, y + 1, x + w - 8, y + 2, activeTheme.isLight ? 0x20FFFFFF : 0x18FFFFFF);
-        if (r.type == RT.TOGGLE && "Enabled".equals(r.value)) {
-            ctx.fill(x + 1, y + 10, x + 3, y + CARD_H - 10, C_ACCENT);
-            ctx.fillGradient(x + 3, y + 10, x + 9, y + CARD_H - 10, 0x22007AFF, 0x00007AFF);
+        if (activeTheme == UiTheme.LIQUID_GLASS && glassBackdrop.drawLens(ctx, x, y, w, CARD_H, cardRadius, false)) {
+            if (hovered)
+                fillRounded(ctx, x + 1, y + 1, w - 2, CARD_H - 2, 0x08FFFFFF, cardRadius - 1);
+        } else {
+            fillRounded(ctx, x, y, w, CARD_H, baseCol, cardRadius);
+            drawRoundedOutline(ctx, x, y, w, CARD_H, C_CARD_STROKE, cardRadius);
+            ctx.fill(x + cardRadius, y + 1, x + w - cardRadius, y + 2,
+                    activeTheme.isLight ? 0x20FFFFFF : 0x18FFFFFF);
         }
         if (hovered)
             fillRounded(ctx, x + 1, y + 1, w - 2, CARD_H - 2, 0x0DFFFFFF, cardRadius - 1);
 
-        int labelCol = hovered ? C_TEXT_PRI : (activeTheme.isLight ? 0xFF4D3A36 : 0xFFF0F0F5);
+        int labelCol = C_TEXT_PRI;
         int reserved = 80;
         if (r.type == RT.TOGGLE) {
             reserved = PILL_W + 24;
@@ -760,21 +975,22 @@ public class MetalRenderSettingsScreen extends Screen {
         String displayLabel = truncateLabel(font, r.label, maxLabelW);
         int labelX = x + 14;
         int labelY = y + (CARD_H - 9) / 2;
-        ctx.text(font, Component.literal(displayLabel), labelX, labelY, labelCol, false);
+        ctx.text(font, Component.literal(displayLabel), labelX, labelY, labelCol, activeTheme == UiTheme.LIQUID_GLASS);
 
         int rx = x + w - 12;
         switch (r.type) {
             case TOGGLE -> {
                 boolean on = "Enabled".equals(r.value);
-                drawPill(ctx, rx - PILL_W, y + (CARD_H - PILL_H) / 2, on);
+                drawPill(ctx, rx - PILL_W, y + (CARD_H - PILL_H) / 2, on, r.label);
             }
             case CYCLE -> {
                 int vw = font.width(r.value) + 24;
-                fillRounded(ctx, rx - vw, y + 10, vw, CARD_H - 20, C_ACCENT, 7);
-                drawRoundedOutline(ctx, rx - vw, y + 10, vw, CARD_H - 20, 0x1AFFFFFF, 7);
-                ctx.fill(rx - vw + 2, y + 11, rx - 2, y + 12, 0x22FFFFFF);
+                fillRounded(ctx, rx - vw, y + 10, vw, CARD_H - 20,
+                        ARGB.color(activeTheme.isLight ? 24 : 38, C_ACCENT), 7);
+                drawRoundedOutline(ctx, rx - vw, y + 10, vw, CARD_H - 20,
+                        ARGB.color(activeTheme.isLight ? 48 : 64, C_ACCENT), 7);
                 String chev = r.value + "  \u203A";
-                ctx.centeredText(font, Component.literal(chev), rx - vw / 2, y + (CARD_H - 9) / 2, 0xFFFFFFFF);
+                ctx.centeredText(font, Component.literal(chev), rx - vw / 2, y + (CARD_H - 9) / 2, C_TEXT_ACCENT);
             }
             case INFO -> {
                 String v = r.value == null ? "" : r.value;
@@ -802,6 +1018,10 @@ public class MetalRenderSettingsScreen extends Screen {
             }
             case VANILLA -> {
                 String v = r.value == null ? "" : r.value;
+                if ("ON".equals(v) || "OFF".equals(v)) {
+                    drawPill(ctx, rx - PILL_W, y + (CARD_H - PILL_H) / 2, "ON".equals(v), r.label);
+                    break;
+                }
                 int col = "ON".equals(v) ? C_VAL_ON : ("OFF".equals(v) ? C_VAL_OFF : C_TEXT_ACCENT);
                 int pillBg = "ON".equals(v) ? (activeTheme.isLight ? 0xFFE0EAD8 : 0xFF1A2E22)
                         : ("OFF".equals(v) ? (activeTheme.isLight ? 0xFFF0D8D0 : 0xFF2E1E1E)
@@ -819,7 +1039,8 @@ public class MetalRenderSettingsScreen extends Screen {
                     String sv = r.slider.getMessage().getString();
                     String dispSv = truncateLabel(font, sv, 64);
                     int sw = font.width(dispSv) + 12;
-                    int bg = activeTheme.isLight ? 0xFFEADFD3 : 0xFF1E2430;
+                    int bg = activeTheme == UiTheme.LIQUID_GLASS ? 0x28354150
+                            : (activeTheme.isLight ? 0xFFEADFD3 : 0xFF1E2430);
                     fillRounded(ctx, rx - sliderW - 10 - sw, y + 12, sw, CARD_H - 24, bg, 6);
                     if (activeTheme.isLight)
                         drawRoundedOutline(ctx, rx - sliderW - 10 - sw, y + 12, sw, CARD_H - 24, 0x14C9A090, 6);
@@ -832,27 +1053,47 @@ public class MetalRenderSettingsScreen extends Screen {
         }
     }
 
-    private void drawPill(GuiGraphicsExtractor ctx, int x, int y, boolean on) {
-        int r = activeTheme.pillRadius;
-        if (on) {
-            ctx.fillGradient(x, y + 2, x + PILL_W, y + PILL_H - 2, C_PILL_ON, C_PILL_ON_GRAD);
-            fillRounded(ctx, x, y, PILL_W, PILL_H, C_PILL_ON, r);
-            ctx.fillGradient(x + 2, y + 2, x + PILL_W - 2, y + PILL_H - 2, C_PILL_ON, C_PILL_ON_GRAD);
-            ctx.fill(x + 8, y + 1, x + PILL_W - 8, y + 2, activeTheme.isLight ? 0x40FFFFFF : 0x35FFFFFF);
-        } else {
-            fillRounded(ctx, x, y, PILL_W, PILL_H, C_PILL_OFF, r);
-            drawRoundedOutline(ctx, x, y, PILL_W, PILL_H, C_PILL_OFF_STROKE, r);
+    private void drawPill(GuiGraphicsExtractor ctx, int x, int y, boolean on, String key) {
+        long now = System.nanoTime();
+        ToggleMotion motion = toggleMotions.get(key);
+        if (motion == null) {
+            motion = new ToggleMotion(on, now);
+            toggleMotions.put(key, motion);
         }
-        int knobSize = PILL_H - 4;
-        int kx = on ? x + PILL_W - knobSize - 2 : x + 2;
-        int ky = y + 2;
-        ctx.fill(kx + 1, ky + knobSize - 1, kx + knobSize - 1, ky + knobSize + 1, 0x40000000);
-        ctx.fill(kx + 2, ky + 1, kx + knobSize - 2, ky + knobSize - 2, 0xFFFFFFFF);
-        ctx.fill(kx, ky + 2, kx + knobSize, ky + knobSize - 2, 0xFFFFFFFF);
-        ctx.fill(kx + 3, ky + 2, kx + knobSize - 3, ky + 4, 0xFFFFFFFF);
-        if (on)
-            ctx.fill(kx + knobSize / 2 - 1, ky + knobSize / 2 - 1, kx + knobSize / 2 + 1, ky + knobSize / 2 + 1,
-                    C_PILL_ON);
+        float elapsed = Math.min(0.05f, (now - motion.time) / 1_000_000_000f);
+        motion.time = now;
+        float target = on ? 1.0f : 0.0f;
+        motion.progress += (target - motion.progress) * (1.0f - (float) Math.exp(-elapsed * 22.0f));
+        if (Math.abs(target - motion.progress) < 0.002f)
+            motion.progress = target;
+        int trackX = x + 2;
+        int trackY = y + 1;
+        int trackW = PILL_W - 4;
+        int trackH = PILL_H - 2;
+        boolean glass = activeTheme == UiTheme.LIQUID_GLASS;
+        int track = ARGB.srgbLerp(motion.progress, glass ? 0x243B4C60 : C_PILL_OFF,
+                glass ? 0xC23ABB88 : C_PILL_ON);
+        fillRounded(ctx, trackX, trackY, trackW, trackH, track, trackH / 2);
+        drawRoundedOutline(ctx, trackX, trackY, trackW, trackH,
+                activeTheme.isLight ? 0x1862584E : 0x30FFFFFF, trackH / 2);
+        ctx.fill(trackX + 11, trackY + 1, trackX + trackW - 11, trackY + 2, 0x20FFFFFF);
+        int knob = glass ? trackH - 2 : trackH - 4;
+        int knobW = glass ? 26 : knob;
+        int padding = glass ? 1 : 2;
+        float thumbX = trackX + padding + motion.progress * (trackW - knobW - padding * 2);
+        int knobX = (int) Math.floor(thumbX);
+        int knobY = trackY + padding;
+        ctx.pose().pushMatrix();
+        ctx.pose().translate(thumbX - knobX, 0.0f);
+        fillRounded(ctx, knobX - 1, knobY + 2, knobW + 2, knob + 1, 0x18000000, knob / 2 + 1);
+        if (glass) {
+            drawGlassLens(ctx, knobX, knobY, knobW, knob, knob / 2);
+        } else {
+            fillRounded(ctx, knobX, knobY, knob, knob, activeTheme.isLight ? 0xFFFFFDF9 : 0xF0F4F9FF, knob / 2);
+            drawRoundedOutline(ctx, knobX, knobY, knob, knob, 0x40FFFFFF, knob / 2);
+            fillRounded(ctx, knobX + 4, knobY + 2, knob - 8, 3, 0x40FFFFFF, 1);
+        }
+        ctx.pose().popMatrix();
     }
 
     private void drawScrollFades(GuiGraphicsExtractor ctx) {
@@ -860,15 +1101,11 @@ public class MetalRenderSettingsScreen extends Screen {
             return;
         int ech = contentH();
         if (activeTheme == UiTheme.LIQUID_GLASS) {
-            ctx.fillGradient(cx, cy, cx + cw, cy + 12, 0x801E242E, 0x001E242E);
-            ctx.fillGradient(cx, cy + ech - 12, cx + cw, cy + ech, 0x001E242E, 0x801E242E);
-        } else if (activeTheme.isLight) {
-            ctx.fillGradient(cx, cy, cx + cw, cy + 12, 0xFFF0E6DA, 0x00F0E6DA);
-            ctx.fillGradient(cx, cy + ech - 12, cx + cw, cy + ech, 0x00F0E6DA, 0xFFF0E6DA);
-        } else {
-            ctx.fillGradient(cx, cy, cx + cw, cy + 12, 0xFF222228, 0x00222228);
-            ctx.fillGradient(cx, cy + ech - 12, cx + cw, cy + ech, 0x00222228, 0xFF222228);
+            return;
         }
+        int transparent = C_PANEL & 0x00FFFFFF;
+        ctx.fillGradient(cx, cy, cx + cw, cy + 8, C_PANEL, transparent);
+        ctx.fillGradient(cx, cy + ech - 8, cx + cw, cy + ech, transparent, C_PANEL);
     }
 
     private void renderScrollbar(GuiGraphicsExtractor ctx, int mx, int my) {
@@ -918,14 +1155,15 @@ public class MetalRenderSettingsScreen extends Screen {
     public boolean mouseClicked(MouseButtonEvent click, boolean bl) {
         double mx = click.x(), my = click.y();
 
-        int btnH = 36;
-        int gap = 6;
+        int btnH = sidebarButtonHeight();
+        int gap = sidebarButtonGap();
         if (mx >= sx && mx < sx + sw && my >= sy && my < sy + sh) {
             for (int i = 0; i < TABS.length; i++) {
                 int by = sy + 8 + i * (btnH + gap);
                 if (my >= by && my < by + btnH) {
                     if (selectedTab != i) {
                         selectedTab = i;
+                        toggleMotions.clear();
                         scrollOffset = 0;
                         rebuild();
                     }
