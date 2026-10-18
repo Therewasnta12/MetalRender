@@ -50,10 +50,14 @@ loom {
                 vmArg "-XX:+UseZGC"
             } else {
                 vmArg "-XX:+UseG1GC"
+                vmArg "-XX:G1HeapRegionSize=8m"
             }
             vmArg "-Xmx8g"
-            vmArg "-Xms2g"
+            vmArg "-Xms3g"
             vmArg "-XX:+AlwaysPreTouch"
+            if (!project.hasProperty('nojfr')) {
+                vmArg "-XX:StartFlightRecording=filename=${projectDir}/run/logs/metalrender.jfr,settings=profile,dumponexit=true"
+            }
             
             if (project.hasProperty('gl2metal')) {
                 vmArg "-Dmetalrender.gl2metal=true"
