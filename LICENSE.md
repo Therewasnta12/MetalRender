@@ -1,4 +1,4 @@
-# Pebbles_boon Software Licence
+# Pebbles_boon Licence
 
 ---
 
