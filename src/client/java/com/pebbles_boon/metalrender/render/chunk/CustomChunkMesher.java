@@ -2333,7 +2333,7 @@ public class CustomChunkMesher {
                         ns = (byte) Math.round(sf * 255.0f);
                         boolean er = false;
                         try {
-                            er = state.emissiveRendering(world, pos);
+                            er = state.emissiveRendering();
                         } catch (Exception ignored) {
                         }
                         ne = (byte) (er ? 1 : 0);

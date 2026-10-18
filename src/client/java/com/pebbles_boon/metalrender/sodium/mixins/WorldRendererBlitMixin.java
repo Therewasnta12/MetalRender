@@ -11,7 +11,6 @@ import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.LevelRenderer;
-import net.minecraft.client.renderer.chunk.ChunkSectionsToRender;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
 import net.minecraft.world.phys.Vec3;
@@ -42,12 +41,12 @@ public class WorldRendererBlitMixin {
     @Unique
     private int metalrender$endFrameCount;
 
-    @Inject(method = "renderLevel", at = @At("HEAD"), require = 0)
+    @Inject(method = "render", at = @At("HEAD"), require = 0)
     private void metalrender$beginWorldFrame(
             GraphicsResourceAllocator allocator, DeltaTracker tickCounter,
             boolean renderBlockOutline, CameraRenderState cameraRenderState,
             Matrix4fc positionMatrix, GpuBufferSlice fogBuffer, Vector4f fogColor,
-            boolean renderEntityOutline, ChunkSectionsToRender sectionsToRender,
+            boolean renderEntityOutline,
             CallbackInfo ci) {
         metalrender$frameActive = false;
         metalrender$activeRenderer = null;
@@ -61,7 +60,7 @@ public class WorldRendererBlitMixin {
         }
         try {
             Minecraft mc = Minecraft.getInstance();
-            Camera camera = mc.gameRenderer.getMainCamera();
+            Camera camera = mc.gameRenderer.mainCamera();
             if (camera == null || camera.position() == null) {
                 return;
             }
@@ -112,13 +111,12 @@ public class WorldRendererBlitMixin {
         }
     }
 
-    @Inject(method = "renderLevel", at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/client/renderer/state/level/LevelRenderState;reset()V"), require = 1)
+    @Inject(method = "render", at = @At("RETURN"), require = 1)
     private void metalrender$endWorldFrame(
             GraphicsResourceAllocator allocator, DeltaTracker tickCounter,
             boolean renderBlockOutline, CameraRenderState cameraRenderState,
             Matrix4fc positionMatrix, GpuBufferSlice fogBuffer, Vector4f fogColor,
-            boolean renderEntityOutline, ChunkSectionsToRender sectionsToRender,
+            boolean renderEntityOutline,
             CallbackInfo ci) {
         if (!metalrender$frameActive) {
             return;

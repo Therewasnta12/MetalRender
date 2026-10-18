@@ -1,13 +1,14 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
+import com.mojang.blaze3d.IndexType;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.systems.RenderPass;
+import com.mojang.blaze3d.systems.GpuQueryPool;
 import com.mojang.blaze3d.systems.RenderPassBackend;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
-import com.mojang.blaze3d.vertex.VertexFormat;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -34,8 +35,10 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
     private final Map<String, Binding> samplers = new HashMap<>();
     private MetalCompiledPipeline pipeline;
     private MetalBuffer vertexBuffer;
+    private long vertexOffset;
+    private final RenderPass.RenderArea renderArea;
     private MetalBuffer indexBuffer;
-    private VertexFormat.IndexType indexType = VertexFormat.IndexType.INT;
+    private IndexType indexType = IndexType.INT;
     private boolean scissorEnabled;
     private int scissorX;
     private int scissorY;
@@ -45,8 +48,9 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
     private boolean closed;
 
     MetalRenderPassBackend(MetalCommandEncoderBackend encoder, MetalDeviceBackend device,
-            String label, MetalTextureView color, MetalTextureView depth) {
+            String label, MetalTextureView color, MetalTextureView depth, RenderPass.RenderArea renderArea) {
         this.encoder = encoder;
+        this.renderArea = renderArea;
         this.device = device;
         this.label = label;
         if (color != null) {
@@ -76,6 +80,7 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
     MetalRenderPassBackend(MetalCommandEncoderBackend encoder, MetalDeviceBackend device,
             String label, MetalTexture color, MetalTexture depth) {
         this.encoder = encoder;
+        this.renderArea = null;
         this.device = device;
         this.label = label;
         this.colorTexture = color != null ? color.handle() : 0;
@@ -151,33 +156,70 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
     }
 
     @Override
-    public void setVertexBuffer(int slot, GpuBuffer buffer) {
+    public void setVertexBuffer(int slot, GpuBufferSlice slice) {
         if (slot != 0) {
             throw new IllegalArgumentException("Vertex buffer slot is out of range: " + slot);
         }
-        this.vertexBuffer = (MetalBuffer) buffer;
+        this.vertexBuffer = slice != null ? (MetalBuffer) slice.buffer() : null;
+        this.vertexOffset = slice != null ? slice.offset() : 0;
     }
 
     @Override
-    public void setIndexBuffer(GpuBuffer buffer, VertexFormat.IndexType type) {
+    public void setIndexBuffer(GpuBuffer buffer, IndexType type) {
         this.indexBuffer = (MetalBuffer) buffer;
         this.indexType = type;
     }
 
     @Override
-    public void drawIndexed(int baseVertex, int firstIndex, int indexCount, int instanceCount) {
+    public void drawIndexed(int indexCount, int instanceCount, int firstIndex, int baseVertex,
+            int firstInstance) {
         submitDraw(baseVertex, firstIndex, indexCount, indexType, instanceCount);
     }
 
     @Override
+    public void multiDrawIndexed(java.nio.IntBuffer counts, int a, int b, int c) {
+        throw new UnsupportedOperationException("multiDrawIndexed is not supported by the Metal backend");
+    }
+
+    @Override
+    public void multiDrawIndexed(org.lwjgl.PointerBuffer offsets, java.nio.IntBuffer counts,
+            java.nio.IntBuffer baseVertices, int count) {
+        throw new UnsupportedOperationException("multiDrawIndexed is not supported by the Metal backend");
+    }
+
+    @Override
+    public void drawIndexedIndirect(GpuBufferSlice slice, int count) {
+        throw new UnsupportedOperationException("drawIndexedIndirect is not supported by the Metal backend");
+    }
+
+    @Override
+    public void multiDraw(java.nio.IntBuffer firsts, int a, int b, int c) {
+        throw new UnsupportedOperationException("multiDraw is not supported by the Metal backend");
+    }
+
+    @Override
+    public void multiDraw(java.nio.IntBuffer firsts, java.nio.IntBuffer counts, int count) {
+        throw new UnsupportedOperationException("multiDraw is not supported by the Metal backend");
+    }
+
+    @Override
+    public void drawIndirect(GpuBufferSlice slice, int count) {
+        throw new UnsupportedOperationException("drawIndirect is not supported by the Metal backend");
+    }
+
+    @Override
+    public void writeTimestamp(GpuQueryPool pool, int index) {
+    }
+
+    @Override
     public <T> void drawMultipleIndexed(Collection<RenderPass.Draw<T>> draws, GpuBuffer fallbackIndexBuffer,
-            VertexFormat.IndexType fallbackIndexType, Collection<String> dynamicUniforms, T argument) {
-        VertexFormat.IndexType defaultType = fallbackIndexType != null ? fallbackIndexType
-                : VertexFormat.IndexType.SHORT;
+            IndexType fallbackIndexType, Collection<String> dynamicUniforms, T argument) {
+        IndexType defaultType = fallbackIndexType != null ? fallbackIndexType
+                : IndexType.SHORT;
         for (RenderPass.Draw<T> draw : draws) {
-            VertexFormat.IndexType type = draw.indexType() != null ? draw.indexType() : defaultType;
+            IndexType type = draw.indexType() != null ? draw.indexType() : defaultType;
             setIndexBuffer(draw.indexBuffer() != null ? draw.indexBuffer() : fallbackIndexBuffer, type);
-            setVertexBuffer(draw.slot(), draw.vertexBuffer());
+            setVertexBuffer(draw.slot(), draw.vertexBuffer() != null ? draw.vertexBuffer().slice() : null);
             if (draw.uniformUploaderConsumer() != null) {
                 draw.uniformUploaderConsumer().accept(argument, this::setUniform);
             }
@@ -186,18 +228,18 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
     }
 
     @Override
-    public void draw(int firstVertex, int vertexCount) {
-        submitDraw(firstVertex, 0, vertexCount, null, 1);
+    public void draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance) {
+        submitDraw(firstVertex, 0, vertexCount, null, instanceCount);
     }
 
-    private void submitDraw(int baseVertex, int firstIndex, int count, VertexFormat.IndexType type,
+    private void submitDraw(int baseVertex, int firstIndex, int count, IndexType type,
             int instances) {
         MetalCompiledPipeline compiled = pipeline;
         if (compiled == null || compiled.drawsNothing() || count <= 0) {
             return;
         }
         RenderPipeline info = compiled.info();
-        boolean hasFormat = !info.getVertexFormat().getElements().isEmpty();
+        boolean hasFormat = compiled.hasVertexFormat();
         if (hasFormat && (vertexBuffer == null || vertexBuffer.isClosed())) {
             return;
         }
@@ -208,7 +250,7 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
         if (pso == 0) {
             return;
         }
-        List<String> samplerNames = info.getSamplers();
+        List<String> samplerNames = compiled.samplers();
         for (int i = 0; i < samplerNames.size(); i++) {
             Binding binding = samplers.get(samplerNames.get(i));
             if (binding != null && !binding.view().isClosed()) {
@@ -226,10 +268,11 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
                     MetalNative.WINDING_CLOCKWISE, compiled.fillMode(), compiled.depthBias(),
                     compiled.slopeScale());
         }
-        int sx = scissorEnabled ? scissorX : 0;
-        int sy = scissorEnabled ? scissorY : 0;
-        int sw = scissorEnabled ? scissorWidth : targetWidth;
-        int sh = scissorEnabled ? scissorHeight : targetHeight;
+        boolean area = renderArea != null && !scissorEnabled;
+        int sx = scissorEnabled ? scissorX : area ? renderArea.x() : 0;
+        int sy = scissorEnabled ? scissorY : area ? renderArea.y() : 0;
+        int sw = scissorEnabled ? scissorWidth : area ? renderArea.width() : targetWidth;
+        int sh = scissorEnabled ? scissorHeight : area ? renderArea.height() : targetHeight;
         if (encoder.bindScissor(sx, sy, sw, sh)) {
             MetalNative.nCtxSetScissor(ctx, sx, sy, sw, sh);
         }
@@ -266,8 +309,8 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
             }
         }
         if (hasFormat) {
-            if (encoder.bindVertex(vertexBuffer.handle())) {
-                MetalNative.nCtxSetVertexBuffer(ctx, vertexBuffer.handle(), 0, 0);
+            if (encoder.bindVertex(vertexBuffer.handle(), vertexOffset)) {
+                MetalNative.nCtxSetVertexBuffer(ctx, vertexBuffer.handle(), vertexOffset, 0);
             }
             vertexBuffer.lastUseFrame = serial;
         }
@@ -279,14 +322,14 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
             MetalNative.nCtxDraw(ctx, compiled.primitive(), baseVertex, count, instances);
         } else {
             MetalNative.nCtxDrawIndexed(ctx, compiled.primitive(), count,
-                    type == VertexFormat.IndexType.INT, indexBuffer.handle(),
+                    type == IndexType.INT, indexBuffer.handle(),
                     (long) firstIndex * type.bytes, instances, baseVertex);
             indexBuffer.lastUseFrame = serial;
         }
     }
 
     private void drawFan(long ctx, int baseVertex, int firstIndex, int count,
-            VertexFormat.IndexType type, int instances) {
+            IndexType type, int instances) {
         if (count < 3) {
             return;
         }
@@ -305,7 +348,7 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
             return;
         }
         long src = indexBuffer.contents() + (long) firstIndex * type.bytes;
-        boolean wide = type == VertexFormat.IndexType.INT;
+        boolean wide = type == IndexType.INT;
         int first = readIndex(src, 0, wide);
         for (int i = 1; i <= triangles; i++) {
             MemoryUtil.memPutInt(dst, first);
@@ -345,8 +388,7 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
         }
     }
 
-    @Override
-    public void close() {
+    void finish() {
         if (!closed) {
             closed = true;
             while (debugGroups > 0) {
@@ -356,8 +398,7 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
         }
     }
 
-    @Override
-    public boolean isClosed() {
+    boolean isClosed() {
         return closed;
     }
 }

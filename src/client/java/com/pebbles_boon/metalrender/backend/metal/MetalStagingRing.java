@@ -12,6 +12,7 @@ final class MetalStagingRing {
         final long capacity;
         long offset;
         long lastUseSerial;
+        MetalBuffer wrapper;
 
         Block(long handle, long contents, long capacity) {
             this.handle = handle;
@@ -20,7 +21,7 @@ final class MetalStagingRing {
         }
     }
 
-    record Allocation(long buffer, long offset, long address) {
+    record Allocation(long buffer, long offset, long address, Block block) {
     }
 
     private final long device;
@@ -38,7 +39,7 @@ final class MetalStagingRing {
             if (start + size <= current.capacity) {
                 current.offset = start + size;
                 current.lastUseSerial = openSerial;
-                return new Allocation(current.handle, start, current.contents + start);
+                return new Allocation(current.handle, start, current.contents + start, current);
             }
         }
         Block chosen = null;
@@ -70,7 +71,7 @@ final class MetalStagingRing {
         chosen.offset = size;
         chosen.lastUseSerial = openSerial;
         current = chosen;
-        return new Allocation(chosen.handle, 0, chosen.contents);
+        return new Allocation(chosen.handle, 0, chosen.contents, chosen);
     }
 
     void trim(long completedSerial) {

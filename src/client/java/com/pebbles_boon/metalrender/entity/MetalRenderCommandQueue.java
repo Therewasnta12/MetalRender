@@ -109,7 +109,6 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
         }
     }
 
-    @Override
     public void submitModelPart(ModelPart part, PoseStack matrices, RenderType layer,
             int light, int overlay, TextureAtlasSprite sprite,
             boolean visible, boolean noCull, int color,
@@ -318,7 +317,7 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
     @Override
     public void submitNameTag(PoseStack matrices, Vec3 pos, int bgColor,
             Component text, boolean seeThrough, int textColor,
-            double distance, CameraRenderState camera) {
+            CameraRenderState camera) {
     }
 
     @Override
@@ -340,7 +339,7 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
 
     @Override
     public void submitMovingBlock(PoseStack matrices,
-            MovingBlockRenderState state) {
+            MovingBlockRenderState state, int light) {
         if (state == null || state.blockState == null || vertexConsumer == null) {
             return;
         }
@@ -390,7 +389,7 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
             return;
         }
 
-        int light = defaultLight != 0 ? defaultLight : 0x00F000F0;
+        light = defaultLight != 0 ? defaultLight : 0x00F000F0;
         int start = currentVertexCount();
         for (BlockStateModelPart part : parts) {
             if (part == null) {
@@ -501,9 +500,8 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
 
     @Override
     public void submitBreakingBlockModel(PoseStack matrices,
-            BlockStateModel model, long seed,
-            int progress) {
-        if (matrices == null || model == null || progress < 0 ||
+            List<BlockStateModelPart> parts, int progress) {
+        if (matrices == null || parts == null || progress < 0 ||
                 progress >= ModelBakery.DESTROY_STAGE_COUNT ||
                 !(vertexConsumer instanceof MetalVertexConsumer mvc)) {
             return;
@@ -511,8 +509,6 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
         AbstractTexture texture = Minecraft.getInstance().getTextureManager()
                 .getTexture(ModelBakery.BREAKING_LOCATIONS.get(progress));
         if (!(texture.getTexture() instanceof GlTexture gl)) return;
-        java.util.ArrayList<BlockStateModelPart> parts = new java.util.ArrayList<>();
-        model.collectParts(RandomSource.create(seed), parts);
         int start = mvc.getVertexCount();
         for (BlockStateModelPart part : parts) {
             for (Direction face : Direction.values()) {
@@ -656,7 +652,17 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
     }
 
     @Override
-    public void submitParticleGroup(SubmitNodeCollector.ParticleGroupRenderer particleGroup) {
+    public void submitShapeOutline(PoseStack matrices, net.minecraft.world.phys.shapes.VoxelShape shape,
+            RenderType layer, int color, float lineWidth, boolean depthTest) {
+    }
+
+    @Override
+    public void submitQuadParticleGroup(net.minecraft.client.renderer.state.level.QuadParticleRenderState state) {
+    }
+
+    @Override
+    public void submitGizmoPrimitives(net.minecraft.client.renderer.gizmos.DrawableGizmoPrimitives.Group group,
+            CameraRenderState camera, boolean depthTest) {
     }
 
     private static void invokeSetupAnim(Model<?> model, Object state) {

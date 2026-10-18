@@ -130,11 +130,11 @@ public final class MetalDebugEntry implements DebugScreenEntry {
             rows.add(String.format(Locale.ROOT, "CPU: %s", GLX._getCpuInfo()));
             rows.add(String.format(Locale.ROOT, "Display: %dx%d (%s)",
                     mc.getWindow().getWidth(),
-                    mc.getWindow().getHeight(), dev.getVendor()));
-            rows.add(dev.getRenderer());
+                    mc.getWindow().getHeight(), dev.getDeviceInfo().vendorName()));
+            rows.add(dev.getDeviceInfo().name());
             if (!rendOn()) {
-                rows.add(String.format(Locale.ROOT, "%s %s", dev.getBackendName(),
-                        dev.getVersion()));
+                rows.add(String.format(Locale.ROOT, "%s %s", dev.getDeviceInfo().backendName(),
+                        dev.getDeviceInfo().driverInfo()));
             }
             dsp.addToGroup(SYS_GRP, rows);
         }

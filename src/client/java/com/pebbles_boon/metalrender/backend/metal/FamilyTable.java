@@ -66,6 +66,8 @@ public final class FamilyTable {
         vertex("core/rendertype_lightning", Family.ENTITY);
         vertex("core/rendertype_outline", Family.ENTITY);
         vertex("core/rendertype_water_mask", Family.ENTITY);
+        vertex("core/text", Family.TEXT);
+        vertex("core/text_background", Family.TEXT);
         vertex("core/rendertype_text", Family.TEXT);
         vertex("core/rendertype_text_background", Family.TEXT);
         vertex("core/rendertype_text_background_see_through", Family.TEXT);
@@ -200,9 +202,26 @@ public final class FamilyTable {
         return family != null ? family : Family.UNMAPPED;
     }
 
+    private static int textVariant(RenderPipeline pipeline, String path) {
+        var flags = pipeline.getShaderDefines().flags();
+        boolean seeThrough = flags.contains("IS_SEE_THROUGH") || flags.contains("IS_GUI");
+        if ("core/text_background".equals(path)) {
+            return seeThrough ? 14 : 11;
+        }
+        if ("core/text".equals(path)) {
+            boolean gray = flags.contains("IS_GRAYSCALE");
+            return gray ? (seeThrough ? 15 : 12) : (seeThrough ? 13 : 10);
+        }
+        return -2;
+    }
+
     static int vertexVariant(RenderPipeline pipeline) {
         if (!isVanilla(pipeline.getVertexShader())) {
             return -1;
+        }
+        int text = textVariant(pipeline, shaderKey(pipeline.getVertexShader()));
+        if (text != -2) {
+            return text;
         }
         return VERTEX_VARIANTS.getOrDefault(shaderKey(pipeline.getVertexShader()), -1);
     }
@@ -216,6 +235,10 @@ public final class FamilyTable {
         }
         if (!isVanilla(pipeline.getFragmentShader())) {
             return -1;
+        }
+        int text = textVariant(pipeline, shaderKey(pipeline.getFragmentShader()));
+        if (text != -2) {
+            return text;
         }
         return FRAGMENT_VARIANTS.getOrDefault(shaderKey(pipeline.getFragmentShader()), -1);
     }

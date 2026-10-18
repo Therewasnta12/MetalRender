@@ -17,10 +17,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(targets = "net.minecraft.client.renderer.GameRenderer", remap = false)
 public abstract class GameRendererMixin {
     @Inject(method = "render", at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/client/gui/render/GuiRenderer;render(Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V"),
+            target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V"),
             require = 1)
     private void metalrender$captureSettingsBackdrop(DeltaTracker deltaTracker, boolean renderLevel, CallbackInfo ci) {
-        if (Minecraft.getInstance().screen instanceof MetalRenderSettingsScreen settings)
+        if (Minecraft.getInstance().gui.screen() instanceof MetalRenderSettingsScreen settings)
             settings.captureGlassBackdrop();
     }
 

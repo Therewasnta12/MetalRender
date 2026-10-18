@@ -1,14 +1,16 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
+import com.mojang.blaze3d.GpuFormat;
+import com.mojang.blaze3d.PrimitiveTopology;
+import com.mojang.blaze3d.pipeline.BindGroupLayout;
 import com.mojang.blaze3d.pipeline.BlendFunction;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.DepthStencilState;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.platform.CompareOp;
-import com.mojang.blaze3d.platform.DestFactor;
+import com.mojang.blaze3d.platform.BlendFactor;
 import com.mojang.blaze3d.platform.PolygonMode;
-import com.mojang.blaze3d.platform.SourceFactor;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormatElement;
 import com.pebbles_boon.metalrender.util.MetalLogger;
@@ -47,6 +49,7 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
     private final boolean drawable;
     private final int[] constants;
     private final int[] vertexLayout;
+    private final List<String> samplers;
     private final int[] blend;
     private final int writeMask;
     private final int primitive;
@@ -66,15 +69,17 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
         this.info = info;
         this.family = FamilyTable.lookup(info);
         this.drawable = FamilyTable.drawable(info, family);
-        VertexFormat format = info.getVertexFormat();
+        VertexFormat[] bindings = info.getVertexFormatBindings();
+        VertexFormat format = bindings.length > 0 ? bindings[0] : null;
         this.vertexLayout = buildVertexLayout(format);
+        this.samplers = BindGroupLayout.flattenSamplers(info.getBindGroupLayouts());
         this.constants = buildConstants(info, format);
         ColorTargetState color = info.getColorTargetState();
         Optional<BlendFunction> blendFunction = color.blendFunction();
         if (blendFunction.isPresent()) {
             BlendFunction b = blendFunction.get();
-            this.blend = new int[] {1, source(b.sourceColor()), dest(b.destColor()),
-                    source(b.sourceAlpha()), dest(b.destAlpha())};
+            this.blend = new int[] {1, factor(b.color().sourceFactor()), factor(b.color().destFactor()),
+                    factor(b.alpha().sourceFactor()), factor(b.alpha().destFactor())};
         } else {
             this.blend = new int[] {0, 0, 0, 0, 0};
         }
@@ -92,18 +97,18 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
             mask |= 1;
         }
         this.writeMask = mask;
-        VertexFormat.Mode mode = info.getVertexFormatMode();
-        this.triangleFan = mode == VertexFormat.Mode.TRIANGLE_FAN;
+        PrimitiveTopology mode = info.getPrimitiveTopology();
+        this.triangleFan = mode == PrimitiveTopology.TRIANGLE_FAN;
         this.primitive = switch (mode) {
             case POINTS -> MetalNative.PRIMITIVE_POINT;
-            case DEBUG_LINES -> MetalNative.PRIMITIVE_LINE;
+            case DEBUG_LINES, LINES -> MetalNative.PRIMITIVE_LINE;
             case DEBUG_LINE_STRIP -> MetalNative.PRIMITIVE_LINE_STRIP;
             case TRIANGLE_STRIP -> MetalNative.PRIMITIVE_TRIANGLE_STRIP;
             default -> MetalNative.PRIMITIVE_TRIANGLE;
         };
         this.topology = switch (mode) {
             case POINTS -> MetalNative.TOPOLOGY_POINT;
-            case DEBUG_LINES, DEBUG_LINE_STRIP -> MetalNative.TOPOLOGY_LINE;
+            case DEBUG_LINES, LINES, DEBUG_LINE_STRIP -> MetalNative.TOPOLOGY_LINE;
             default -> MetalNative.TOPOLOGY_TRIANGLE;
         };
         this.cullMode = info.isCull() ? MetalNative.CULL_BACK : MetalNative.CULL_NONE;
@@ -126,6 +131,14 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
     @Override
     public boolean isValid() {
         return !failed;
+    }
+
+    List<String> samplers() {
+        return samplers;
+    }
+
+    boolean hasVertexFormat() {
+        return vertexLayout != null;
     }
 
     RenderPipeline info() {
@@ -210,6 +223,9 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
     }
 
     private static int[] buildVertexLayout(VertexFormat format) {
+        if (format == null) {
+            return null;
+        }
         List<VertexFormatElement> elements = format.getElements();
         if (elements.isEmpty()) {
             return null;
@@ -224,7 +240,7 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
             }
             layout.add(attribute);
             layout.add(metalFormat);
-            layout.add(format.getOffset(element));
+            layout.add(element.offset());
         }
         int[] out = new int[layout.size()];
         for (int i = 0; i < out.length; i++) {
@@ -234,77 +250,116 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
     }
 
     static int attributeIndex(VertexFormatElement element) {
-        if (element == VertexFormatElement.POSITION) {
-            return 0;
-        }
-        if (element == VertexFormatElement.COLOR) {
-            return 1;
-        }
-        if (element == VertexFormatElement.UV0 || element == VertexFormatElement.UV) {
-            return 2;
-        }
-        if (element == VertexFormatElement.UV1) {
-            return 3;
-        }
-        if (element == VertexFormatElement.UV2) {
-            return 4;
-        }
-        if (element == VertexFormatElement.NORMAL) {
-            return 5;
-        }
-        if (element == VertexFormatElement.LINE_WIDTH) {
-            return 6;
-        }
-        return -1;
+        return switch (element.name()) {
+            case "Position" -> 0;
+            case "Color" -> 1;
+            case "UV0" -> 2;
+            case "UV1" -> 3;
+            case "UV2" -> 4;
+            case "Normal" -> 5;
+            case "LineWidth" -> 6;
+            default -> -1;
+        };
     }
 
     static int vertexFormat(VertexFormatElement element) {
-        int count = element.count();
-        boolean n = element.normalized();
-        return switch (element.type()) {
-            case FLOAT -> switch (count) {
+        GpuFormat format = element.format();
+        int count = format.componentCount();
+        boolean n;
+        int kind;
+        switch (format.componentType()) {
+            case FLOAT_32 -> {
+                n = false;
+                kind = 0;
+            }
+            case UNORM_8 -> {
+                n = true;
+                kind = 1;
+            }
+            case UINT_8 -> {
+                n = false;
+                kind = 1;
+            }
+            case SNORM_8 -> {
+                n = true;
+                kind = 2;
+            }
+            case SINT_8 -> {
+                n = false;
+                kind = 2;
+            }
+            case UNORM_16 -> {
+                n = true;
+                kind = 3;
+            }
+            case UINT_16 -> {
+                n = false;
+                kind = 3;
+            }
+            case SNORM_16 -> {
+                n = true;
+                kind = 4;
+            }
+            case SINT_16 -> {
+                n = false;
+                kind = 4;
+            }
+            case UINT_32 -> {
+                n = false;
+                kind = 5;
+            }
+            case SINT_32 -> {
+                n = false;
+                kind = 6;
+            }
+            default -> {
+                return 0;
+            }
+        }
+        return switch (kind) {
+            case 0 -> switch (count) {
                 case 1 -> 28;
                 case 2 -> 29;
                 case 3 -> 30;
                 case 4 -> 31;
                 default -> 0;
             };
-            case UBYTE -> switch (count) {
+            case 1 -> switch (count) {
                 case 1 -> n ? 47 : 45;
                 case 2 -> n ? 7 : 1;
                 case 3 -> n ? 8 : 2;
                 case 4 -> n ? 9 : 3;
                 default -> 0;
             };
-            case BYTE -> switch (count) {
+            case 2 -> switch (count) {
                 case 1 -> n ? 48 : 46;
                 case 2 -> n ? 10 : 4;
                 case 3 -> n ? 11 : 5;
                 case 4 -> n ? 12 : 6;
                 default -> 0;
             };
-            case USHORT -> switch (count) {
+            case 3 -> switch (count) {
                 case 1 -> n ? 51 : 49;
                 case 2 -> n ? 19 : 13;
                 case 3 -> n ? 20 : 14;
                 case 4 -> n ? 21 : 15;
                 default -> 0;
             };
-            case SHORT -> switch (count) {
+            case 4 -> switch (count) {
                 case 1 -> n ? 52 : 50;
                 case 2 -> n ? 22 : 16;
                 case 3 -> n ? 23 : 17;
                 case 4 -> n ? 24 : 18;
                 default -> 0;
             };
-            case UINT -> switch (count) {
+            case 5 -> switch (count) {
                 case 1 -> 36;
                 case 2 -> 37;
                 case 3 -> 38;
                 case 4 -> 39;
                 default -> 0;
             };
-            case INT -> switch (count) {
+            default -> switch (count) {
                 case 1 -> 32;
                 case 2 -> 33;
                 case 3 -> 34;
@@ -348,16 +403,16 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
         }
         addInt(c, FC_VS_VARIANT, FamilyTable.vertexVariant(info));
         addInt(c, FC_FS_VARIANT, FamilyTable.fragmentVariant(info));
-        addBool(c, FC_HAS_POSITION, format.contains(VertexFormatElement.POSITION));
-        addBool(c, FC_HAS_COLOR, format.contains(VertexFormatElement.COLOR));
-        addBool(c, FC_HAS_UV0, format.contains(VertexFormatElement.UV0));
-        addBool(c, FC_HAS_UV1, format.contains(VertexFormatElement.UV1));
-        addBool(c, FC_HAS_UV2, format.contains(VertexFormatElement.UV2));
-        addBool(c, FC_HAS_NORMAL, format.contains(VertexFormatElement.NORMAL));
-        addBool(c, FC_HAS_LINE_WIDTH, format.contains(VertexFormatElement.LINE_WIDTH));
+        addBool(c, FC_HAS_POSITION, format != null && format.contains("Position"));
+        addBool(c, FC_HAS_COLOR, format != null && format.contains("Color"));
+        addBool(c, FC_HAS_UV0, format != null && format.contains("UV0"));
+        addBool(c, FC_HAS_UV1, format != null && format.contains("UV1"));
+        addBool(c, FC_HAS_UV2, format != null && format.contains("UV2"));
+        addBool(c, FC_HAS_NORMAL, format != null && format.contains("Normal"));
+        addBool(c, FC_HAS_LINE_WIDTH, format != null && format.contains("LineWidth"));
         boolean projection = false;
         boolean transforms = false;
-        for (RenderPipeline.UniformDescription u : info.getUniforms()) {
+        for (BindGroupLayout.UniformDescription u : BindGroupLayout.flattenUniforms(info.getBindGroupLayouts())) {
             projection |= "Projection".equals(u.name());
             transforms |= "DynamicTransforms".equals(u.name());
         }
@@ -395,7 +450,7 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
         };
     }
 
-    static int source(SourceFactor f) {
+    static int factor(BlendFactor f) {
         return switch (f) {
             case ZERO -> 0;
             case ONE -> 1;
@@ -408,25 +463,6 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
             case DST_ALPHA -> 8;
             case ONE_MINUS_DST_ALPHA -> 9;
             case SRC_ALPHA_SATURATE -> 10;
-            case CONSTANT_COLOR -> 11;
-            case ONE_MINUS_CONSTANT_COLOR -> 12;
-            case CONSTANT_ALPHA -> 13;
-            case ONE_MINUS_CONSTANT_ALPHA -> 14;
-        };
-    }
-
-    static int dest(DestFactor f) {
-        return switch (f) {
-            case ZERO -> 0;
-            case ONE -> 1;
-            case SRC_COLOR -> 2;
-            case ONE_MINUS_SRC_COLOR -> 3;
-            case SRC_ALPHA -> 4;
-            case ONE_MINUS_SRC_ALPHA -> 5;
-            case DST_COLOR -> 6;
-            case ONE_MINUS_DST_COLOR -> 7;
-            case DST_ALPHA -> 8;
-            case ONE_MINUS_DST_ALPHA -> 9;
             case CONSTANT_COLOR -> 11;
             case ONE_MINUS_CONSTANT_COLOR -> 12;
             case CONSTANT_ALPHA -> 13;

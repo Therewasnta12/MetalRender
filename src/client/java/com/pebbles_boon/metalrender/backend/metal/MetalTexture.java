@@ -1,7 +1,7 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
 import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.textures.TextureFormat;
+import com.mojang.blaze3d.GpuFormat;
 
 public final class MetalTexture extends GpuTexture {
     private long handle;
@@ -9,7 +9,7 @@ public final class MetalTexture extends GpuTexture {
     private final int textureType;
     private final int layers;
 
-    MetalTexture(MetalDeviceBackend device, int usage, String label, TextureFormat format, int width,
+    MetalTexture(MetalDeviceBackend device, int usage, String label, GpuFormat format, int width,
             int height, int depthOrLayers, int mipLevels) {
         super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.pixelFormat = pixelFormat(format);
@@ -42,12 +42,13 @@ public final class MetalTexture extends GpuTexture {
         }
     }
 
-    static int pixelFormat(TextureFormat format) {
+    static int pixelFormat(GpuFormat format) {
         return switch (format) {
-            case RGBA8 -> MetalNative.PIXEL_RGBA8;
-            case RED8 -> MetalNative.PIXEL_R8;
-            case RED8I -> MetalNative.PIXEL_R8I;
-            case DEPTH32 -> MetalNative.PIXEL_DEPTH32;
+            case RGBA8_UNORM -> MetalNative.PIXEL_RGBA8;
+            case R8_UNORM -> MetalNative.PIXEL_R8;
+            case R8_SINT -> MetalNative.PIXEL_R8I;
+            case D32_FLOAT -> MetalNative.PIXEL_DEPTH32;
+            default -> throw new IllegalArgumentException("Unsupported texture format " + format);
         };
     }
 

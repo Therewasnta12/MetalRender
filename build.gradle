@@ -1,5 +1,5 @@
 plugins {
-    id 'net.fabricmc.fabric-loom' version '1.15-SNAPSHOT'
+    id 'net.fabricmc.fabric-loom' version '1.19.1'
     id 'maven-publish'
 }
 
@@ -26,9 +26,9 @@ repositories {
         }
 }
 dependencies {
-    minecraft "com.mojang:minecraft:26.1.1"
-    implementation "net.fabricmc:fabric-loader:0.19.2"
-    implementation "net.fabricmc.fabric-api:fabric-api:0.149.0+26.1.2"
+    minecraft "com.mojang:minecraft:26.2"
+    implementation "net.fabricmc:fabric-loader:0.20.0"
+    implementation "net.fabricmc.fabric-api:fabric-api:0.161.0+26.2"
     implementation "org.lwjgl:lwjgl:3.3.3"
     implementation "org.lwjgl:lwjgl-glfw:3.3.3"
     implementation "org.lwjgl:lwjgl:3.3.3:natives-macos"

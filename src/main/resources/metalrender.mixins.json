@@ -10,9 +10,12 @@
     "BackendInstallMixin",
     "GameRendererMixin",
     "VanillaSectionCompileTaskMixin",
+    "VanillaSectionTaskMixin",
     "WorldRendererTerrainMixin",
     "LevelReadyMixin",
     "EntityRenderMixin",
+    "EntitySubmitMixin",
+    "GuiStartupBlockerMixin",
     "ParticleCaptureMixin",
     "WorldRendererBlitMixin",
     "ClientWorldMixin",
@@ -27,7 +30,8 @@
     "accessor.RenderPassAccessor",
     "accessor.BillboardParticleAccessor",
     "accessor.ParticleAccessor",
-    "accessor.ParticleManagerAccessor"
+    "accessor.ParticleManagerAccessor",
+    "accessor.ParticleGroupAccessor"
   ],
   "injectors": {
     "defaultRequire": 0

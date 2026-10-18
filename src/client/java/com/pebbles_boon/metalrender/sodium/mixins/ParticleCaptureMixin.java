@@ -44,7 +44,8 @@ public class ParticleCaptureMixin {
                 for (Map.Entry<ParticleRenderType, ParticleGroup<?>> entry : particlesMap.entrySet()) {
                     ParticleGroup<?> group = entry.getValue();
                     if (group != null && !group.isEmpty()) {
-                        particleRenderer.captureParticleList(group.getAll(), camera,
+                        particleRenderer.captureParticleList(((com.pebbles_boon.metalrender.sodium.mixins.accessor.ParticleGroupAccessor) (Object) group)
+                                .metalrender$getParticles(), camera,
                                 tickDelta);
                     }
                 }

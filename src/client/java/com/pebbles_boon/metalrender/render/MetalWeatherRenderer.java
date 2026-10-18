@@ -79,7 +79,7 @@ public class MetalWeatherRenderer {
         reusableState.reset();
         int tick = (int) (mc.level.getGameTime() & 0x7FFFFFFFL);
         try {
-            vanilla.extractRenderState(mc.level, tick, tickDelta, camera.position(), reusableState);
+            vanilla.extractRenderState(mc.level, tickDelta, camera.position(), reusableState);
         } catch (Exception e) {
             frameCount++;
             return;

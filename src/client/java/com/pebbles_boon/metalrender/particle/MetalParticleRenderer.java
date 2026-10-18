@@ -355,7 +355,7 @@ public class MetalParticleRenderer {
         Minecraft mc = Minecraft.getInstance();
         if (mc == null)
             return;
-        Camera camera = mc.gameRenderer.getMainCamera();
+        Camera camera = mc.gameRenderer.mainCamera();
         if (camera == null)
             return;
         Quaternionf camRot = camera.rotation();

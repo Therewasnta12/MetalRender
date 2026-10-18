@@ -178,7 +178,7 @@ public final class MetalRenderCommands {
         try {
             Minecraft mc = Minecraft.getInstance();
             if (mc != null && mc.levelRenderer != null) {
-                mc.levelRenderer.allChanged();
+                MetalRenderClient.reloadLevelRenderer(mc);
             }
             MetalWorldRenderer wr = MetalRenderClient.getWorldRenderer();
             if (wr != null) {

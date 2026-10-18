@@ -40,17 +40,7 @@ public class MinecraftClientMixin {
         }
     }
 
-    @Inject(method = "setScreen", at = @At("HEAD"), cancellable = true)
-    private void metalrender$keepStartupBlocker(Screen screen, CallbackInfo ci) {
-        if (!StartupBlocker.shouldBlockStartup() ||
-                metalrender$forcingStartupBlocker) {
-            return;
-        }
-        metalrender$forceStartupBlocker();
-        ci.cancel();
-    }
-
-    @Inject(method = "setScreenAndRender", at = @At("HEAD"), cancellable = true)
+    @Inject(method = "setScreenAndShow", at = @At("HEAD"), cancellable = true)
     private void metalrender$keepStartupBlockerVisible(Screen screen,
             CallbackInfo ci) {
         if (!StartupBlocker.shouldBlockStartup() ||
@@ -61,21 +51,11 @@ public class MinecraftClientMixin {
         ci.cancel();
     }
 
-    @Inject(method = "setOverlay", at = @At("HEAD"), cancellable = true)
-    private void metalrender$blockStartupOverlays(Overlay overlay,
-            CallbackInfo ci) {
-        if (StartupBlocker.shouldBlockStartup() &&
-                !metalrender$forcingStartupBlocker &&
-                !(overlay instanceof StartupBlockerOverlay)) {
-            ci.cancel();
-        }
-    }
-
     @Unique
     private void metalrender$forceStartupBlocker() {
         metalrender$forcingStartupBlocker = true;
         try {
-            ((Minecraft) (Object) this).setOverlay(new StartupBlockerOverlay());
+            ((Minecraft) (Object) this).gui.setOverlay(new StartupBlockerOverlay());
         } finally {
             metalrender$forcingStartupBlocker = false;
         }
@@ -147,10 +127,10 @@ public class MinecraftClientMixin {
     }
 
     @Redirect(method = "renderFrame", at = @At(value = "INVOKE",
-            target = "Lcom/mojang/blaze3d/systems/RenderSystem;flipFrame(Lcom/mojang/blaze3d/TracyFrameCapture;)V"))
-    private void metalrender$timeFlip(com.mojang.blaze3d.TracyFrameCapture capture) {
+            target = "Lcom/mojang/blaze3d/systems/GpuSurface;present()V"))
+    private void metalrender$timeFlip(com.mojang.blaze3d.systems.GpuSurface surface) {
         long t0 = System.nanoTime();
-        com.mojang.blaze3d.systems.RenderSystem.flipFrame(capture);
+        surface.present();
         MetalRenderProfiler.getInstance().recordSwap(t0, System.nanoTime());
     }
 

@@ -1,6 +1,5 @@
 package com.pebbles_boon.metalrender.sodium.mixins;
 
-import com.mojang.blaze3d.vertex.PoseStack;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.config.MetalRenderConfig;
 import com.pebbles_boon.metalrender.entity.MetalEntityRenderer;
@@ -9,12 +8,9 @@ import com.pebbles_boon.metalrender.util.MetalLogger;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.LevelRenderer;
-import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
 import net.minecraft.client.multiplayer.ClientLevel;
-import net.minecraft.client.renderer.blockentity.BlockEntityRenderDispatcher;
 import net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
@@ -30,11 +26,8 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-@Mixin(LevelRenderer.class)
+@Mixin(net.minecraft.client.renderer.extract.LevelExtractor.class)
 public class EntityRenderMixin {
-    @Shadow
-    private BlockEntityRenderDispatcher blockEntityRenderDispatcher;
-
     @Shadow
     private ClientLevel level;
 
@@ -153,8 +146,8 @@ public class EntityRenderMixin {
                     if (blockEntity.getBlockPos().distToCenterSqr(cameraPos) > metalrender$hardCullDistSq) {
                         continue;
                     }
-                    BlockEntityRenderState state = blockEntityRenderDispatcher.tryExtractRenderState(
-                            blockEntity, tickDelta, null);
+                    BlockEntityRenderState state = Minecraft.getInstance().getBlockEntityRenderDispatcher().tryExtractRenderState(
+                            blockEntity, tickDelta, null, false);
                     if (state != null) {
                         levelRenderState.blockEntityRenderStates.add(state);
                     }
@@ -163,20 +156,6 @@ public class EntityRenderMixin {
         }
         if (metalrender$blockEntityFrames % 300 == 1) {
             MetalLogger.info("[blockentity] collected=%d", levelRenderState.blockEntityRenderStates.size());
-        }
-    }
-
-    @Inject(method = "submitEntities", at = @At("HEAD"), cancellable = true, require = 0)
-    private void metalrender$suppressVanillaEntities(PoseStack matrices,
-            LevelRenderState renderStates,
-            SubmitNodeCollector queue,
-            CallbackInfo ci) {
-        if (!MetalRenderClient.isEnabled()) {
-            return;
-        }
-        MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
-        if (worldRenderer != null && worldRenderer.captureActive()) {
-            ci.cancel();
         }
     }
 }

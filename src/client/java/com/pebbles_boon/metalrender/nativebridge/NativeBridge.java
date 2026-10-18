@@ -110,6 +110,8 @@ public final class NativeBridge {
 
     public static native void nSetCameraFacingCulling(boolean enabled);
 
+    public static native void nSetReverseZ(boolean enabled);
+
     public static native void nGetCameraFacingCullStats(int[] outStats);
 
     public static native void nBindTexture(long handle, long textureHandle,

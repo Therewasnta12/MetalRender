@@ -1,5 +1,6 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
+import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
@@ -7,13 +8,19 @@ import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.systems.BackendCreationException;
 import com.mojang.blaze3d.systems.CommandEncoderBackend;
+import com.mojang.blaze3d.systems.DeviceFeatures;
+import com.mojang.blaze3d.systems.DeviceInfo;
+import com.mojang.blaze3d.systems.DeviceLimits;
+import com.mojang.blaze3d.systems.DeviceType;
+import com.mojang.blaze3d.systems.GpuQueryPool;
+import com.mojang.blaze3d.systems.GpuSurfaceBackend;
+import com.mojang.blaze3d.systems.HintsAndWorkarounds;
 import com.mojang.blaze3d.systems.GpuDeviceBackend;
 import com.mojang.blaze3d.textures.AddressMode;
 import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
-import com.mojang.blaze3d.textures.TextureFormat;
 import com.pebbles_boon.metalrender.util.MetalLogger;
 import java.io.IOException;
 import java.io.InputStream;
@@ -22,6 +29,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.OptionalDouble;
 import java.util.function.Supplier;
 import org.lwjgl.system.MemoryUtil;
@@ -36,7 +44,8 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     private final long library;
     private final long ctx;
     private final String deviceName;
-    private final MetalSurface surface;
+    private final long window;
+    private MetalSurface surface;
     private final MetalCommandEncoderBackend encoder;
     private final MetalBindings bindings;
     private final Map<SamplerKey, Long> samplerStates = new HashMap<>();
@@ -46,14 +55,15 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     private static String libraryError;
 
     MetalDeviceBackend(long window, ShaderSource shaderSource) throws BackendCreationException {
+        this.window = window;
         try {
             MetalNative.ensureLoaded();
         } catch (Throwable t) {
-            throw new BackendCreationException("MetalRender native library unavailable: " + t.getMessage());
+            throw new BackendCreationException("MetalRender native library unavailable: " + t.getMessage(), BackendCreationException.Reason.OTHER);
         }
         long[] handles = MetalNative.nDeviceCreate();
         if (handles == null || handles[0] == 0 || handles[1] == 0) {
-            throw new BackendCreationException("Metal device creation failed: " + MetalNative.nLastError());
+            throw new BackendCreationException("Metal device creation failed: " + MetalNative.nLastError(), BackendCreationException.Reason.OTHER);
         }
         this.device = handles[0];
         this.queue = handles[1];
@@ -63,18 +73,12 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
         this.library = loadLibrary(device);
         if (library == 0) {
             releaseCore(0, 0);
-            throw new BackendCreationException("Metal shader library failed: " + libraryError);
+            throw new BackendCreationException("Metal shader library failed: " + libraryError, BackendCreationException.Reason.OTHER);
         }
         this.ctx = MetalNative.nCtxCreate(device, queue, library);
         if (ctx == 0) {
             releaseCore(library, 0);
-            throw new BackendCreationException("Metal command context failed: " + MetalNative.nLastError());
-        }
-        try {
-            this.surface = new MetalSurface(window, false);
-        } catch (RuntimeException e) {
-            releaseCore(library, ctx);
-            throw new BackendCreationException("Metal surface failed: " + e.getMessage());
+            throw new BackendCreationException("Metal command context failed: " + MetalNative.nLastError(), BackendCreationException.Reason.OTHER);
         }
         this.encoder = new MetalCommandEncoderBackend(this, ctx);
         this.bindings = new MetalBindings(MetalNative.nUniformBlockSizes());
@@ -128,6 +132,10 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
         return surface;
     }
 
+    MetalCommandEncoderBackend encoder() {
+        return encoder;
+    }
+
     MetalBindings bindings() {
         return bindings;
     }
@@ -148,6 +156,14 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
         }
         FamilyTable.logCoverage();
         return pipelines.computeIfAbsent(pipeline, p -> new MetalCompiledPipeline(this, p));
+    }
+
+    @Override
+    public GpuSurfaceBackend createSurface(long windowHandle) {
+        if (surface == null) {
+            surface = new MetalSurface(windowHandle != 0 ? windowHandle : window, true);
+        }
+        return new MetalSurfaceBackend(this, surface);
     }
 
     @Override
@@ -180,14 +196,14 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     }
 
     @Override
-    public GpuTexture createTexture(Supplier<String> label, int usage, TextureFormat format, int width,
+    public GpuTexture createTexture(Supplier<String> label, int usage, GpuFormat format, int width,
             int height, int depthOrLayers, int mipLevels) {
         return createTexture(label != null ? label.get() : null, usage, format, width, height, depthOrLayers,
                 mipLevels);
     }
 
     @Override
-    public GpuTexture createTexture(String label, int usage, TextureFormat format, int width, int height,
+    public GpuTexture createTexture(String label, int usage, GpuFormat format, int width, int height,
             int depthOrLayers, int mipLevels) {
         return new MetalTexture(this, usage, label, format, width, height, depthOrLayers, mipLevels);
     }
@@ -215,11 +231,6 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     }
 
     @Override
-    public String getImplementationInformation() {
-        return "Metal (MetalRender)";
-    }
-
-    @Override
     public List<String> getLastDebugMessages() {
         return List.of();
     }
@@ -227,36 +238,6 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     @Override
     public boolean isDebuggingEnabled() {
         return false;
-    }
-
-    @Override
-    public String getVendor() {
-        return "Apple";
-    }
-
-    @Override
-    public String getBackendName() {
-        return "Metal";
-    }
-
-    @Override
-    public String getVersion() {
-        return "Metal 3";
-    }
-
-    @Override
-    public String getRenderer() {
-        return deviceName;
-    }
-
-    @Override
-    public int getMaxTextureSize() {
-        return 16384;
-    }
-
-    @Override
-    public int getUniformOffsetAlignment() {
-        return 256;
     }
 
     @Override
@@ -273,13 +254,21 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     }
 
     @Override
-    public List<String> getEnabledExtensions() {
-        return List.of();
+    public GpuQueryPool createTimestampQueryPool(int size) {
+        return new MetalQueryPool(size);
     }
 
     @Override
-    public int getMaxSupportedAnisotropy() {
-        return 16;
+    public long getTimestampNow() {
+        return System.nanoTime();
+    }
+
+    @Override
+    public DeviceInfo getDeviceInfo() {
+        return new DeviceInfo(deviceName, "Apple", "Metal 3", true, "Metal", 1.0f,
+                new DeviceLimits(16, 256, 16384, Integer.MAX_VALUE, 0, 1),
+                new DeviceFeatures(false, false, false, false, false, false, true), Set.of(),
+                new HintsAndWorkarounds(false, false), DeviceType.INTEGRATED);
     }
 
     @Override
@@ -298,22 +287,10 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
             MetalNative.nRelease(state);
         }
         depthStates.clear();
-        surface.close();
+        if (surface != null) {
+            surface.close();
+        }
         releaseCore(library, ctx);
     }
 
-    @Override
-    public void setVsync(boolean vsync) {
-        surface.setVsync(vsync);
-    }
-
-    @Override
-    public void presentFrame() {
-        encoder.presentFrame();
-    }
-
-    @Override
-    public boolean isZZeroToOne() {
-        return true;
-    }
 }

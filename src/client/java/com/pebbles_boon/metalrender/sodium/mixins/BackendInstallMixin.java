@@ -5,12 +5,15 @@ import com.pebbles_boon.metalrender.backend.metal.MetalGpuBackend;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import org.spongepowered.asm.mixin.injection.Redirect;
+import net.minecraft.client.PreferredGraphicsApi;
 
 @Mixin(Minecraft.class)
 public class BackendInstallMixin {
-    @ModifyVariable(method = "<init>", at = @At("STORE"), index = 9)
-    private GpuBackend[] metalrender$installMetalBackend(GpuBackend[] original) {
+    @Redirect(method = "<init>", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/PreferredGraphicsApi;getBackendsToTry()[Lcom/mojang/blaze3d/systems/GpuBackend;"))
+    private GpuBackend[] metalrender$installMetalBackend(PreferredGraphicsApi api) {
+        GpuBackend[] original = api.getBackendsToTry();
         if ("gl".equals(System.getProperty("metalrender.backend", "metal"))) {
             return original;
         }

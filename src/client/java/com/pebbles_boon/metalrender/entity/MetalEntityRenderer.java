@@ -177,7 +177,7 @@ public class MetalEntityRenderer {
             return;
         }
 
-        Camera camera = mc.gameRenderer.getMainCamera();
+        Camera camera = mc.gameRenderer.mainCamera();
         double camX;
         double camY;
         double camZ;
@@ -289,9 +289,11 @@ public class MetalEntityRenderer {
             } else {
                 reusableCmdQueue.reset(metalVertexConsumer, 0x00F000F0);
             }
-            reusableCmdQueue.submitBreakingBlockModel(matrixStack,
-                    mc.getModelManager().getBlockStateModelSet().get(breaking.blockState()),
-                    breaking.blockState().getSeed(breaking.blockPos()), breaking.progress());
+            java.util.ArrayList<net.minecraft.client.renderer.block.dispatch.BlockStateModelPart> breakingParts = new java.util.ArrayList<>();
+            mc.getModelManager().getBlockStateModelSet().get(breaking.blockState()).collectParts(
+                    net.minecraft.util.RandomSource.create(breaking.blockState().getSeed(breaking.blockPos())),
+                    breakingParts);
+            reusableCmdQueue.submitBreakingBlockModel(matrixStack, breakingParts, breaking.progress());
             for (MetalRenderCommandQueue.DrawSegment segment : reusableCmdQueue.getSegments()) {
                 enqueueDraw(segment.startVertex, segment.vertexCount, 0,
                         segment.glTextureId, segment.renderFlags);
@@ -321,7 +323,7 @@ public class MetalEntityRenderer {
         matrixStack.setIdentity();
         matrixStack.translate(state.blockPos.getX() - camX, state.blockPos.getY() - camY,
                 state.blockPos.getZ() - camZ);
-        Camera camera = mc.gameRenderer.getMainCamera();
+        Camera camera = mc.gameRenderer.mainCamera();
         if (camera != null && camera.isInitialized()) {
             camera.extractRenderState(reusableCameraRenderState, tickDelta);
         }
@@ -456,7 +458,7 @@ public class MetalEntityRenderer {
         }
 
         Minecraft mc = Minecraft.getInstance();
-        Camera camera = mc != null ? mc.gameRenderer.getMainCamera() : null;
+        Camera camera = mc != null ? mc.gameRenderer.mainCamera() : null;
         if (camera != null && camera.isInitialized()) {
             camera.extractRenderState(reusableCameraRenderState, tickDelta);
         } else {

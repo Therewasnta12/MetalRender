@@ -34,6 +34,7 @@ public final class MetalRenderer {
     }
 
     public void init(int width, int height) {
+        NativeBridge.nSetReverseZ(com.pebbles_boon.metalrender.MetalRenderClient.isBackendMode());
         this.handle = NativeBridge.nInit(width, height, MetalRenderConfig.resolutionScale(),
                 MetalRenderConfig.isMetalFXTemporalEnabled());
         if (this.handle != 0L) {

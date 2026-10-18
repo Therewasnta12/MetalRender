@@ -14,7 +14,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.OptionalInt;
 import net.minecraft.client.CloudStatus;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.OptionInstance;
@@ -63,12 +62,19 @@ public class MetalRenderSettingsScreen extends Screen {
                     .withLocation(Identifier.fromNamespaceAndPath("metalrender", "pipeline/" + name))
                     .withVertexShader(source.getVertexShader())
                     .withFragmentShader(Identifier.fromNamespaceAndPath("metalrender", "core/" + name))
-                    .withVertexFormat(source.getVertexFormat(), source.getVertexFormatMode())
+                    .withPrimitiveTopology(source.getPrimitiveTopology())
                     .withColorTargetState(source.getColorTargetState())
-                    .withDepthStencilState(java.util.Optional.ofNullable(source.getDepthStencilState())).withCull(false)
-                    .withSampler(name.equals("glass") ? "Sampler0" : "InSampler");
-            for (var uniform : source.getUniforms())
-                builder.withUniform(uniform.name(), uniform.type());
+                    .withDepthStencilState(java.util.Optional.ofNullable(source.getDepthStencilState())).withCull(false);
+            if (source.getVertexFormatBindings().length > 0)
+                builder.withVertexBinding(0, source.getVertexFormatBinding(0));
+            var layout = com.mojang.blaze3d.pipeline.BindGroupLayout.builder();
+            var existing = com.mojang.blaze3d.pipeline.BindGroupLayout.flattenSamplers(source.getBindGroupLayouts());
+            String sampler = name.equals("glass") ? "Sampler0" : "InSampler";
+            if (!existing.contains(sampler))
+                layout.withSampler(sampler);
+            builder.withBindGroupLayout(layout.build());
+            for (var other : source.getBindGroupLayouts())
+                builder.withBindGroupLayout(other);
             return builder.build();
         }
 
@@ -76,7 +82,7 @@ public class MetalRenderSettingsScreen extends Screen {
             var mc = Minecraft.getInstance();
             if (!MetalRenderClient.isBackendMode() || mc.level == null)
                 return;
-            var main = mc.getMainRenderTarget();
+            var main = mc.gameRenderer.mainRenderTarget();
             int width = Math.max(1, (main.width + 3) / 4);
             int height = Math.max(1, (main.height + 3) / 4);
             if (scene != null && scene.getWidth(0) == width && scene.getHeight(0) == height)
@@ -96,17 +102,17 @@ public class MetalRenderSettingsScreen extends Screen {
                 return;
             var encoder = RenderSystem.getDevice().createCommandEncoder();
             var sampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
-            try (var pass = encoder.createRenderPass(() -> "Settings glass downsample", sceneView, OptionalInt.empty())) {
+            try (var pass = encoder.createRenderPass(() -> "Settings glass downsample", sceneView, java.util.Optional.empty())) {
                 pass.setPipeline(RenderPipelines.ENTITY_OUTLINE_BLIT);
                 RenderSystem.bindDefaultUniforms(pass);
-                pass.bindTexture("InSampler", Minecraft.getInstance().getMainRenderTarget().getColorTextureView(), sampler);
-                pass.draw(0, 3);
+                pass.bindTexture("InSampler", Minecraft.getInstance().gameRenderer.mainRenderTarget().getColorTextureView(), sampler);
+                pass.draw(3, 1, 0, 0);
             }
-            try (var pass = encoder.createRenderPass(() -> "Settings glass frost", blurredView, OptionalInt.empty())) {
+            try (var pass = encoder.createRenderPass(() -> "Settings glass frost", blurredView, java.util.Optional.empty())) {
                 pass.setPipeline(BLUR);
                 RenderSystem.bindDefaultUniforms(pass);
                 pass.bindTexture("InSampler", sceneView, sampler);
-                pass.draw(0, 3);
+                pass.draw(3, 1, 0, 0);
             }
         }
 
@@ -800,7 +806,7 @@ public class MetalRenderSettingsScreen extends Screen {
     }
 
     public static void drawGlassLens(GuiGraphicsExtractor ctx, int x, int y, int w, int h, int radius) {
-        if (Minecraft.getInstance().screen instanceof MetalRenderSettingsScreen settings
+        if (Minecraft.getInstance().gui.screen() instanceof MetalRenderSettingsScreen settings
                 && settings.glassBackdrop.drawLens(ctx, x, y, w, h, radius, false))
             return;
         fillGlassRounded(ctx, x, y, w, h, 0x30FFFFFF, radius);
@@ -1272,7 +1278,7 @@ public class MetalRenderSettingsScreen extends Screen {
 
         Minecraft mc = Minecraft.getInstance();
         if (mc != null)
-            mc.setScreen(parent);
+            mc.gui.setScreen(parent);
     }
 
     private void applyPending() {

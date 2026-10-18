@@ -627,6 +627,7 @@ static id<MTLRenderPipelineState> g_pipelineWeather = nil;
 static id<MTLRenderPipelineState> g_pipelineDebugLines = nil;
 static id<MTLRenderPipelineState> g_pipelineDebugThickLines = nil;
 id<MTLDepthStencilState> g_depthState = nil;
+static bool g_reverseZ = false;
 static id<MTLDepthStencilState> g_depthStateNoWrite = nil;
 static id<MTLDepthStencilState> g_depthStateLessEqual = nil;
 
@@ -2100,19 +2101,22 @@ kernel void mfx_preserve_alpha(
     }
   }
   MTLDepthStencilDescriptor *dsDesc = [[MTLDepthStencilDescriptor alloc] init];
-  dsDesc.depthCompareFunction = MTLCompareFunctionLess;
+  dsDesc.depthCompareFunction =
+      g_reverseZ ? MTLCompareFunctionGreater : MTLCompareFunctionLess;
   dsDesc.depthWriteEnabled = YES;
   g_depthState = [g_device newDepthStencilStateWithDescriptor:dsDesc];
   g_depthStateReversedZ = g_depthState;
   MTLDepthStencilDescriptor *dsNoWrite =
       [[MTLDepthStencilDescriptor alloc] init];
-  dsNoWrite.depthCompareFunction = MTLCompareFunctionLessEqual;
+  dsNoWrite.depthCompareFunction = g_reverseZ ? MTLCompareFunctionGreaterEqual
+                                              : MTLCompareFunctionLessEqual;
   dsNoWrite.depthWriteEnabled = NO;
   g_depthStateNoWrite = [g_device newDepthStencilStateWithDescriptor:dsNoWrite];
   g_depthStateReversedZNoWrite = g_depthStateNoWrite;
   MTLDepthStencilDescriptor *dsLessEq =
       [[MTLDepthStencilDescriptor alloc] init];
-  dsLessEq.depthCompareFunction = MTLCompareFunctionLessEqual;
+  dsLessEq.depthCompareFunction = g_reverseZ ? MTLCompareFunctionGreaterEqual
+                                             : MTLCompareFunctionLessEqual;
   dsLessEq.depthWriteEnabled = NO;
   g_depthStateLessEqual =
       [g_device newDepthStencilStateWithDescriptor:dsLessEq];
@@ -8273,6 +8277,12 @@ static void mr_release_external_encoder() {
   [g_currentEncoder release];
   g_currentEncoder = nil;
   g_currentPipeline = nil;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetReverseZ(
+    JNIEnv *, jclass, jboolean enabled) {
+  g_reverseZ = enabled == JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jint JNICALL

@@ -1,0 +1,54 @@
+package com.pebbles_boon.metalrender.backend.metal;
+
+import com.mojang.blaze3d.systems.CommandEncoderBackend;
+import com.mojang.blaze3d.systems.GpuSurface;
+import com.mojang.blaze3d.systems.GpuSurfaceBackend;
+import com.mojang.blaze3d.textures.GpuTextureView;
+import java.util.Collection;
+import java.util.List;
+
+final class MetalSurfaceBackend implements GpuSurfaceBackend {
+    private final MetalDeviceBackend device;
+    private final MetalSurface surface;
+
+    MetalSurfaceBackend(MetalDeviceBackend device, MetalSurface surface) {
+        this.device = device;
+        this.surface = surface;
+    }
+
+    @Override
+    public void configure(GpuSurface.Configuration configuration) {
+        surface.setVsync(configuration.presentMode() != GpuSurface.PresentMode.IMMEDIATE);
+        surface.syncSize();
+    }
+
+    @Override
+    public boolean isSuboptimal() {
+        return false;
+    }
+
+    @Override
+    public void acquireNextTexture() {
+        surface.syncSize();
+    }
+
+    @Override
+    public void blitFromTexture(CommandEncoderBackend encoder, GpuTextureView view) {
+        ((MetalCommandEncoderBackend) encoder).blitToSurface(surface, (MetalTextureView) view);
+    }
+
+    @Override
+    public void present() {
+        device.encoder().presentFrame();
+    }
+
+    @Override
+    public void close() {
+        surface.close();
+    }
+
+    @Override
+    public Collection<GpuSurface.PresentMode> supportedPresentModes() {
+        return List.of(GpuSurface.PresentMode.IMMEDIATE, GpuSurface.PresentMode.FIFO);
+    }
+}

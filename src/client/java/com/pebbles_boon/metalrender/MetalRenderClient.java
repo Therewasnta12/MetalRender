@@ -17,6 +17,13 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 
 public class MetalRenderClient implements ClientModInitializer {
+    public static void reloadLevelRenderer(Minecraft mc) {
+        if (mc.level == null || mc.levelExtractor == null) {
+            return;
+        }
+        mc.levelExtractor.allChanged();
+    }
+
     private static final int FPS_PRIORITY_SIMULATION_DISTANCE = 5;
     private static MetalRenderer renderer;
     private static MetalRenderConfig config;
@@ -106,7 +113,7 @@ public class MetalRenderClient implements ClientModInitializer {
         }
 
         if (levelRendererRefreshPending && mc != null && mc.levelRenderer != null) {
-            mc.levelRenderer.allChanged();
+            reloadLevelRenderer(mc);
         }
         levelRendererRefreshPending = false;
 
@@ -176,7 +183,7 @@ public class MetalRenderClient implements ClientModInitializer {
             metalUp = false;
             try {
                 if (mc.levelRenderer != null) {
-                    mc.levelRenderer.allChanged();
+                    reloadLevelRenderer(mc);
                 }
             } catch (Throwable ignored) {
             }
@@ -198,7 +205,7 @@ public class MetalRenderClient implements ClientModInitializer {
             }
             try {
                 if (mc.levelRenderer != null) {
-                    mc.levelRenderer.allChanged();
+                    reloadLevelRenderer(mc);
                 }
             } catch (Throwable ignored) {
             }
@@ -237,7 +244,7 @@ public class MetalRenderClient implements ClientModInitializer {
             return;
         }
         try {
-            mc.execute(() -> mc.setScreen(new MetalRenderSettingsScreen(mc.screen)));
+            mc.execute(() -> mc.gui.setScreen(new MetalRenderSettingsScreen(mc.gui.screen())));
             MetalLogger.info("open scween ok");
         } catch (Exception e) {
             MetalLogger.warn("open scween fail: %s", e.getMessage());

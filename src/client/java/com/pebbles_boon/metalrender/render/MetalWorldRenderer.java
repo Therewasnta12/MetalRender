@@ -1013,7 +1013,7 @@ public class MetalWorldRenderer {
                     inWater = mc.getCameraEntity().isUnderWater();
                 }
                 try {
-                    camera = mc.gameRenderer.getMainCamera();
+                    camera = mc.gameRenderer.mainCamera();
                     tickDelta = mc.getDeltaTracker().getGameTimeDeltaPartialTick(true);
                 } catch (Exception ignored) {
                 }
@@ -1083,12 +1083,12 @@ public class MetalWorldRenderer {
 
     private void drawInBackendPass(String label, ExternalDraw draw) {
         Minecraft mc = Minecraft.getInstance();
-        com.mojang.blaze3d.pipeline.RenderTarget target = mc != null ? mc.getMainRenderTarget() : null;
+        com.mojang.blaze3d.pipeline.RenderTarget target = mc != null ? mc.gameRenderer.mainRenderTarget() : null;
         if (target == null || target.getColorTextureView() == null) {
             return;
         }
         try (com.mojang.blaze3d.systems.RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
-                .createRenderPass(() -> label, target.getColorTextureView(), java.util.OptionalInt.empty(),
+                .createRenderPass(() -> label, target.getColorTextureView(), java.util.Optional.empty(),
                         target.getDepthTextureView(), java.util.OptionalDouble.empty())) {
             Object backend = ((com.pebbles_boon.metalrender.sodium.mixins.accessor.RenderPassAccessor) (Object) pass)
                     .metalrender$getBackend();
@@ -1421,7 +1421,7 @@ public class MetalWorldRenderer {
         if (mc.player == null || mc.level == null) {
             return;
         }
-        if (mc.getOverlay() != null) {
+        if (mc.gui.overlay() != null) {
             return;
         }
         if (mc.player != null) {
@@ -2702,12 +2702,12 @@ public class MetalWorldRenderer {
         if (handle == 0)
             return;
         Minecraft mc = Minecraft.getInstance();
-        if (mc != null && mc.getMainRenderTarget() != null) {
+        if (mc != null && mc.gameRenderer.mainRenderTarget() != null) {
             CommandEncoder encoder = RenderSystem.getDevice().createCommandEncoder();
             try (RenderPass pass = encoder.createRenderPass(
                     () -> "metalrender_terrain_blit",
-                    mc.getMainRenderTarget().getColorTextureView(),
-                    java.util.OptionalInt.empty())) {
+                    mc.gameRenderer.mainRenderTarget().getColorTextureView(),
+                    java.util.Optional.empty())) {
                 ioSurfaceBlitter.blit(handle);
             }
         } else {
