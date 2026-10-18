@@ -10,4 +10,12 @@ public final class MetalBackendStats {
         System.arraycopy(values, 0, out, 0, n);
         return n;
     }
+
+    public static String passReport() {
+        try {
+            return MetalNative.nPassReport();
+        } catch (UnsatisfiedLinkError e) {
+            return null;
+        }
+    }
 }

@@ -27,6 +27,16 @@ public final class MetalRenderProfiler {
     private final double[] frameRing = new double[4096];
     private int frameRingCount;
     private volatile String scene = "";
+    private long lastPassReportMs;
+
+    private static long hizCulledSections() {
+        try {
+            return com.pebbles_boon.metalrender.nativebridge.NativeBridge.isLibLoaded()
+                    ? com.pebbles_boon.metalrender.nativebridge.NativeBridge.nGetArenaHizCulled() : 0;
+        } catch (UnsatisfiedLinkError e) {
+            return 0;
+        }
+    }
     private final java.util.LinkedHashMap<String, ArrayList<double[]>> sceneRows = new java.util.LinkedHashMap<>();
     private long lastRssNs;
     private double cachedRssMb;
@@ -141,7 +151,7 @@ public final class MetalRenderProfiler {
             + "quads_per_column,resident_quad_bytes,drawn_quads,gpu_ms,"
             + "frames_in_sec,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_max_ms,process_cpu_pct,rss_mb,"
             + "swap_ms,swap_to_swap_ms,limiter_ms,atlas_readback_ms,atlas_diff_ms,atlas_upload_ms,"
-            + "sections_loaded,sections_beyond_circle,cull_failsafe_frames,vanilla_compile_ms,compress_verify_bad,sections_walk_visible,cave_walk_ms,cave_walks,cave_walk_reuses,encoders_per_frame,presents_per_sec,skipped_presents,quads_tier_a,quads_tier_b,quads_tier_c,arena_live_mb,arena_capacity_mb,arena_free_mb,arena_holes,arena_high_mb,arena_bytes_per_quad,quad_verify_bad,cull_oracle_diff,particles_drawn,particles_culled,particle_ms,scene";
+            + "sections_loaded,sections_beyond_circle,cull_failsafe_frames,vanilla_compile_ms,compress_verify_bad,sections_walk_visible,cave_walk_ms,cave_walks,cave_walk_reuses,encoders_per_frame,presents_per_sec,skipped_presents,quads_tier_a,quads_tier_b,quads_tier_c,arena_live_mb,arena_capacity_mb,arena_free_mb,arena_holes,arena_high_mb,arena_bytes_per_quad,quad_verify_bad,cull_oracle_diff,particles_drawn,particles_culled,particle_ms,hiz_culled_sections,scene";
 
     private MetalRenderProfiler() {
     }
@@ -463,6 +473,11 @@ public final class MetalRenderProfiler {
         long failsafe = Integer.toUnsignedLong((int) nativeDouble(() -> NativeBridge.nGetCullFailsafeFrames()));
         long failsafeDelta = (failsafe - previousCullFailsafe) & 0xffffffffL;
         previousCullFailsafe = failsafe;
+        if (tsMs - lastPassReportMs >= 5000) {
+            lastPassReportMs = tsMs;
+            String report = com.pebbles_boon.metalrender.backend.metal.MetalBackendStats.passReport();
+            if (report != null && !report.startsWith("frames=0")) MetalLogger.info("GPU passes (per frame): %s", report);
+        }
         long[] backend = nativeLongs(3, out -> com.pebbles_boon.metalrender.backend.metal.MetalBackendStats.read(out));
         long nowNs = System.nanoTime();
         double presentsPerSec = 0.0;
@@ -535,6 +550,7 @@ public final class MetalRenderProfiler {
                 .append(',').append(particlesDrawnMax.getAndSet(0))
                 .append(',').append(particlesCulledAcc.getAndSet(0))
                 .append(',').append(fmt(particleNsAcc.getAndSet(0) / 1_000_000.0))
+                .append(',').append(hizCulledSections())
                 .append(',').append('"').append(scene).append('"').append('\n');
         csvQueue.offer(sb.toString());
         if (chunksDrawn > 0) addSceneRow(pct, gpuMs, atlasOut, nativeDrawPrep, meshMs, uploadMs,

@@ -54,6 +54,8 @@ final class MetalNative {
 
     static native String nLastError();
 
+    static native String nPassReport();
+
     static native void nRelease(long object);
 
     static native long nLibraryCreate(long device, ByteBuffer data, int length);
