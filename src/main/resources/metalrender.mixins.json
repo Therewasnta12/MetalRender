@@ -18,6 +18,7 @@
     "GuiStartupBlockerMixin",
     "ParticleCaptureMixin",
     "WorldRendererBlitMixin",
+    "GuiRenderStateMixin",
     "ClientWorldMixin",
     "OptionsScreenMixin",
     "ChunkLoadMixin",
