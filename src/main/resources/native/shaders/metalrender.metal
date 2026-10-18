@@ -402,6 +402,39 @@ fragment half4 fragment_arena_cutout(
     return half4(rgb, half(1.0h));
 }
 
+fragment half4 fragment_arena_water(
+    TerrainVOut in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogUniforms& fog [[buffer(6)]]
+) {
+    constexpr sampler lightSampler(mag_filter::linear, min_filter::linear,
+                                   mip_filter::nearest, address::clamp_to_edge);
+    constexpr sampler atlasSampler(mag_filter::nearest, min_filter::linear,
+                                   mip_filter::linear, max_anisotropy(8));
+    half4 texColor = sample_terrain_atlas(blockAtlas, atlasSampler, in);
+    half vertAlpha = in.color.a;
+    bool flagged = vertAlpha > half(0.994h) && vertAlpha < half(0.998h);
+    bool water = flagged || vertAlpha < half(0.99h);
+    half alpha;
+    if (water) {
+        if (texColor.a < half(0.5h)) {
+            discard_fragment();
+        }
+        alpha = flagged ? half(168.0h / 255.0h) : vertAlpha;
+    } else {
+        if (texColor.a < half(0.02h)) {
+            discard_fragment();
+        }
+        alpha = texColor.a;
+    }
+    half3 rgb = texColor.rgb * in.color.rgb;
+    half3 light = lightmap.sample(lightSampler, float2(in.lightUV)).rgb;
+    rgb *= max(light, half3(0.04h));
+    rgb = vanilla_apply_fog(rgb, in.fogSphCyl, fog);
+    return half4(rgb, alpha);
+}
+
 struct TerrainFragArgs {
     texture2d<half> blockAtlas [[id(0)]];
     texture2d<half> lightmap   [[id(1)]];

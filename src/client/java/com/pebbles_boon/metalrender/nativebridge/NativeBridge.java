@@ -225,6 +225,10 @@ public final class NativeBridge {
 
     public static native boolean nArenaReady();
 
+    public static native void nSetArenaHizCull(boolean enabled);
+
+    public static native long nGetArenaHizCulled();
+
     public static native void nArenaSetSprites(java.nio.ByteBuffer data, int count);
 
     public static native boolean nArenaPublish(int cx, int cy, int cz, int lodTier, java.nio.ByteBuffer quads,

@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <CoreVideo/CoreVideo.h>
+#include <algorithm>
 #include <atomic>
 #include <jni.h>
 #include <mach/mach_time.h>
@@ -78,7 +79,28 @@ struct MRSampleRange {
   int first = 0;
   int count = 0;
   uint8_t cats[MR_SAMPLES_PER_SLOT / 2];
+  uint8_t labels[MR_SAMPLES_PER_SLOT / 2];
 };
+
+static std::mutex g_passLabelMutex;
+static std::vector<std::string> g_passLabelNames;
+static std::unordered_map<std::string, uint8_t> g_passLabelIds;
+static double g_passLabelMs[256] = {};
+static uint32_t g_passLabelCount[256] = {};
+static uint32_t g_passReportFrames = 0;
+
+static uint8_t mr_pass_label_id(const std::string &label) {
+  std::lock_guard<std::mutex> lock(g_passLabelMutex);
+  auto it = g_passLabelIds.find(label);
+  if (it != g_passLabelIds.end())
+    return it->second;
+  if (g_passLabelNames.size() >= 255)
+    return 255;
+  uint8_t id = (uint8_t)g_passLabelNames.size();
+  g_passLabelNames.push_back(label.empty() ? std::string("(unnamed)") : label);
+  g_passLabelIds[label] = id;
+  return id;
+}
 
 struct MRFrameAcc {
   double ms[MR_PASS_CATEGORIES] = {0, 0, 0, 0, 0};
@@ -101,6 +123,7 @@ struct MRContext {
   int sampleSlot = 0;
   int sampleCursor = 0;
   uint8_t sampleCats[MR_SAMPLES_PER_SLOT / 2];
+  uint8_t sampleLabels[MR_SAMPLES_PER_SLOT / 2];
   int sampleEncoders = 0;
   bool cmdHasSamples = false;
   uint64_t timeBaseCpu = 0;
@@ -110,6 +133,7 @@ struct MRContext {
   int frameEncoders = 0;
   id<MTLTexture> deadDepth = nil;
   id<MTLTexture> renderDepth = nil;
+  bool terrainPass = false;
   uint64_t lastPresentNs = 0;
   double avgFrameIntervalNs = 0.0;
   uint64_t lastPresentTick = 0;
@@ -154,8 +178,12 @@ static id<MTLCommandBuffer> mr_cmd(MRContext *ctx) {
   return ctx->cmd;
 }
 
+void mr_arena_hiz_build(id<MTLCommandBuffer> cmd, id<MTLTexture> depth);
+
 static void mr_end_encoders(MRContext *ctx) {
   if (ctx->render) {
+    id<MTLTexture> terrainDepth = ctx->terrainPass && ctx->deadDepth != ctx->renderDepth ? ctx->renderDepth : nil;
+    ctx->terrainPass = false;
     if (ctx->renderDepth) {
       [ctx->render setDepthStoreAction:(ctx->deadDepth == ctx->renderDepth) ? MTLStoreActionDontCare
                                                                            : MTLStoreActionStore];
@@ -166,6 +194,8 @@ static void mr_end_encoders(MRContext *ctx) {
     [ctx->render release];
     ctx->render = nil;
     ctx->renderDepth = nil;
+    if (terrainDepth && ctx->cmd)
+      mr_arena_hiz_build(ctx->cmd, terrainDepth);
   }
   if (ctx->blit) {
     [ctx->blit endEncoding];
@@ -257,6 +287,7 @@ static void mr_attach_samples(MRContext *ctx, MTLRenderPassDescriptor *rp, const
   rp.sampleBufferAttachments[0].startOfFragmentSampleIndex = MTLCounterDontSample;
   rp.sampleBufferAttachments[0].endOfVertexSampleIndex = MTLCounterDontSample;
   ctx->sampleCats[ctx->sampleCursor / 2] = (uint8_t)mr_pass_category(label);
+  ctx->sampleLabels[ctx->sampleCursor / 2] = mr_pass_label_id(label);
   ctx->sampleCursor += 2;
   ctx->cmdHasSamples = true;
 }
@@ -281,7 +312,14 @@ static void mr_collect_samples(MRContext *ctx, MRSampleRange range, id<MTLCounte
     if (a == MTLCounterErrorValue || b == MTLCounterErrorValue || b <= a)
       continue;
     int cat = range.cats[i / 2];
-    ctx->frameAcc.ms[cat] += (double)(b - a) * scale / 1e6;
+    double ms = (double)(b - a) * scale / 1e6;
+    ctx->frameAcc.ms[cat] += ms;
+    uint8_t lid = range.labels[i / 2];
+    if (lid < 255) {
+      std::lock_guard<std::mutex> ll(g_passLabelMutex);
+      g_passLabelMs[lid] += ms;
+      g_passLabelCount[lid]++;
+    }
   }
 }
 
@@ -299,6 +337,33 @@ static void mr_publish_frame(MRContext *ctx, int encoders) {
   }
   g_backendGpuMs.store(total);
   g_backendEncoders.store(encoders);
+  std::lock_guard<std::mutex> ll(g_passLabelMutex);
+  g_passReportFrames++;
+}
+
+extern "C" JNIEXPORT jstring JNICALL MR_JNI(nPassReport)(JNIEnv *env, jclass) {
+  std::string out;
+  {
+    std::lock_guard<std::mutex> ll(g_passLabelMutex);
+    uint32_t frames = g_passReportFrames ? g_passReportFrames : 1;
+    std::vector<int> order;
+    for (int i = 0; i < (int)g_passLabelNames.size(); i++)
+      if (g_passLabelCount[i])
+        order.push_back(i);
+    std::sort(order.begin(), order.end(), [](int a, int b) { return g_passLabelMs[a] > g_passLabelMs[b]; });
+    char buf[256];
+    snprintf(buf, sizeof(buf), "frames=%u", g_passReportFrames);
+    out += buf;
+    for (int i : order) {
+      snprintf(buf, sizeof(buf), " | %s %.3fms x%.2f", g_passLabelNames[i].c_str(), g_passLabelMs[i] / frames,
+               (double)g_passLabelCount[i] / frames);
+      out += buf;
+      g_passLabelMs[i] = 0;
+      g_passLabelCount[i] = 0;
+    }
+    g_passReportFrames = 0;
+  }
+  return env->NewStringUTF(out.c_str());
 }
 
 static CVReturn mr_display_link_callback(CVDisplayLinkRef, const CVTimeStamp *, const CVTimeStamp *outputTime,
@@ -797,6 +862,7 @@ extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxBeginRender)(JNIEnv *env, jclas
       return JNI_FALSE;
     }
     ctx->renderDepth = depthTexture;
+    ctx->terrainPass = depthTexture && labelText == "metalrender_terrain";
     ctx->frameEncoders++;
     if (label) {
       ctx->render.label = [NSString stringWithUTF8String:labelText.c_str()];
@@ -983,7 +1049,7 @@ extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxClearDepthFolded)(JNIEnv *, jcl
                                                                    jdouble depth) {
   @autoreleasepool {
     MRContext *ctx = (MRContext *)(uintptr_t)handle;
-    if (!ctx->render || ctx->depthFormat == MTLPixelFormatInvalid)
+    if (!ctx->render || ctx->depthFormat == MTLPixelFormatInvalid || ctx->terrainPass)
       return JNI_FALSE;
     id<MTLRenderPipelineState> pso = mr_clear_pipeline(ctx, true);
     if (!pso)
@@ -1100,6 +1166,29 @@ static bool mr_should_present(MRContext *ctx) {
   return false;
 }
 
+static std::atomic<void *> g_prefetchedDrawable{nullptr};
+static std::atomic<bool> g_prefetchBusy{false};
+
+static void mr_prefetch_drawable(CAMetalLayer *layer) {
+  if (g_prefetchBusy.exchange(true))
+    return;
+  [layer retain];
+  static dispatch_queue_t queue = dispatch_queue_create("metalrender.drawable", DISPATCH_QUEUE_SERIAL);
+  dispatch_async(queue, ^{
+    @autoreleasepool {
+      id<CAMetalDrawable> next = [layer nextDrawable];
+      if (next) {
+        [next retain];
+        void *old = g_prefetchedDrawable.exchange((void *)next);
+        if (old)
+          [(id)old release];
+      }
+    }
+    g_prefetchBusy.store(false);
+    [layer release];
+  });
+}
+
 extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxPresent)(JNIEnv *, jclass, jlong handle, jlong layerHandle,
                                                           jlong sourceTexture, jlong mainDepth) {
   @autoreleasepool {
@@ -1118,9 +1207,22 @@ extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxPresent)(JNIEnv *, jclass, jlon
     bool wantSync = g_vsyncOn.load() || g_pacedAllowed.load();
     if (layer.displaySyncEnabled != (wantSync ? YES : NO))
       layer.displaySyncEnabled = wantSync ? YES : NO;
-    uint64_t waitStart = mr_now_ns();
-    id<CAMetalDrawable> drawable = [layer nextDrawable];
-    ctx->lastDrawableWaitNs = mr_now_ns() - waitStart;
+    id<CAMetalDrawable> drawable = nil;
+    bool prefetched = g_pacedAllowed.load() && !g_vsyncOn.load();
+    if (prefetched) {
+      drawable = (id<CAMetalDrawable>)g_prefetchedDrawable.exchange(nullptr);
+      if (!drawable) {
+        mr_prefetch_drawable(layer);
+        ctx->lastPresentTick = 0;
+        g_backendSkippedPresents.fetch_add(1);
+        return JNI_TRUE;
+      }
+      [drawable autorelease];
+    } else {
+      uint64_t waitStart = mr_now_ns();
+      drawable = [layer nextDrawable];
+      ctx->lastDrawableWaitNs = mr_now_ns() - waitStart;
+    }
     if (!drawable)
       return JNI_FALSE;
     ctx->lastPresentNs = mr_now_ns();
@@ -1141,6 +1243,8 @@ extern "C" JNIEXPORT jboolean JNICALL MR_JNI(nCtxPresent)(JNIEnv *, jclass, jlon
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [enc endEncoding];
     [cmd presentDrawable:drawable];
+    if (prefetched)
+      mr_prefetch_drawable(layer);
     return JNI_TRUE;
   }
 }
@@ -1159,6 +1263,7 @@ extern "C" JNIEXPORT jlong JNICALL MR_JNI(nCtxSubmit)(JNIEnv *, jclass, jlong ha
       range.first = 0;
       range.count = ctx->sampleCursor;
       memcpy(range.cats, ctx->sampleCats, sizeof(range.cats));
+      memcpy(range.labels, ctx->sampleLabels, sizeof(range.labels));
       sampleBuffer = ctx->sampleBuffers[ctx->sampleSlot];
       [sampleBuffer retain];
       ctx->sampleCursor = 0;

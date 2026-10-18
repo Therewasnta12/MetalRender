@@ -7407,10 +7407,36 @@ struct ArenaCullFrame {
   uint32_t sectionCount;
   uint32_t listCapacity;
   uint32_t pad;
+  float prevViewProj[16];
+  float prevOffset[4];
+  uint32_t hizSize[2];
+  uint32_t hizMips;
+  uint32_t hizFlags;
 };
 static_assert(sizeof(ArenaSectionRecord) == 32, "section record");
 static_assert(sizeof(ArenaUnitRecord) == 16, "unit record");
-static_assert(sizeof(ArenaCullFrame) == 96 + 16, "cull frame");
+static_assert(sizeof(ArenaCullFrame) == 96 + 16 + 96, "cull frame");
+
+static bool g_arenaHizEnabled = true;
+static id<MTLComputePipelineState> g_arenaHizFromDepth = nil;
+static id<MTLComputePipelineState> g_arenaHizDown = nil;
+static id<MTLTexture> g_arenaHizTex = nil;
+static id<MTLTexture> g_arenaHizViews[16] = {};
+static id<MTLTexture> g_arenaHizFallback = nil;
+static uint32_t g_arenaHizMips = 0;
+static uint32_t g_arenaHizDepthW = 0, g_arenaHizDepthH = 0;
+struct ArenaHizSnap {
+  float proj[16];
+  float mv[16];
+  double cam[3];
+  uint64_t frame;
+  bool reverse;
+  bool valid;
+};
+static std::mutex g_arenaHizMutex;
+static ArenaHizSnap g_arenaHizPending = {};
+static ArenaHizSnap g_arenaHizBuilt = {};
+static std::atomic<long long> g_arenaHizCulled{0};
 
 struct ArenaRangeAlloc {
   std::map<uint32_t, uint32_t> byOff;
@@ -7516,6 +7542,7 @@ static id<MTLBuffer> g_arenaArgs[2] = {nil, nil};
 static id<MTLBuffer> g_arenaQuadIdx = nil;
 static id<MTLBuffer> g_arenaStats[2] = {nil, nil};
 static uint32_t g_arenaListCap = 0;
+static const int kArenaLists = 12;
 static ArenaRangeAlloc g_arenaKiB;
 static ArenaRangeAlloc g_arenaUnits;
 static std::vector<uint32_t> g_arenaSlotFree;
@@ -7536,6 +7563,8 @@ static std::atomic<long long> g_arenaOracleCpuQuads[2] = {};
 static std::atomic<uint64_t> g_arenaLastOracleLog{0};
 static id<MTLRenderPipelineState> g_pipelineArena = nil;
 static id<MTLRenderPipelineState> g_pipelineArenaSolid = nil;
+static id<MTLRenderPipelineState> g_pipelineArenaWater = nil;
+static int g_arenaWaterSlot = -1;
 static id<MTLComputePipelineState> g_arenaCullReset = nil;
 static id<MTLComputePipelineState> g_arenaCullMain = nil;
 static id<MTLComputePipelineState> g_arenaCullFinish = nil;
@@ -7568,7 +7597,8 @@ static bool mr_arena_alloc_buffers_locked() {
                                          options:MTLResourceStorageModeShared];
   g_arenaListCap = std::min<uint32_t>(unitCap, 524288u);
   for (int i = 0; i < 2; i++) {
-    g_arenaLists[i] = [g_device newBufferWithLength:(NSUInteger)g_arenaListCap * 64 options:MTLResourceStorageModeShared];
+    g_arenaLists[i] = [g_device newBufferWithLength:(NSUInteger)g_arenaListCap * 8 * kArenaLists
+                                            options:MTLResourceStorageModeShared];
     g_arenaArgs[i] = [g_device newBufferWithLength:256 options:MTLResourceStorageModeShared];
     g_arenaStats[i] = [g_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
   }
@@ -7796,6 +7826,47 @@ static bool mr_arena_ensure_pipelines() {
   [solidDesc release];
   if (!g_pipelineArenaSolid)
     return false;
+  id<MTLFunction> fsWater = [g_shaderLibrary newFunctionWithName:@"fragment_arena_water"];
+  if (fsWater) {
+    MTLRenderPipelineDescriptor *waterDesc = [[MTLRenderPipelineDescriptor alloc] init];
+    waterDesc.vertexFunction = vs;
+    waterDesc.fragmentFunction = fsWater;
+    MTLRenderPipelineColorAttachmentDescriptor *ca = waterDesc.colorAttachments[0];
+    ca.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    ca.blendingEnabled = YES;
+    ca.rgbBlendOperation = MTLBlendOperationAdd;
+    ca.alphaBlendOperation = MTLBlendOperationAdd;
+    ca.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    ca.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    ca.sourceAlphaBlendFactor = MTLBlendFactorOne;
+    ca.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    waterDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    waterDesc.label = @"ArenaWater";
+    g_pipelineArenaWater = makePipeline(waterDesc, &error);
+    [waterDesc release];
+    [fsWater release];
+  }
+  if (!g_pipelineArenaWater)
+    dbg("arena: water pipeline missing, arena water will not draw\n");
+  {
+    id<MTLFunction> fd = [g_shaderLibrary newFunctionWithName:@"terrain_hiz_from_depth"];
+    id<MTLFunction> fm = [g_shaderLibrary newFunctionWithName:@"terrain_hiz_downsample"];
+    if (fd && fm) {
+      g_arenaHizFromDepth = [g_device newComputePipelineStateWithFunction:fd error:&error];
+      g_arenaHizDown = [g_device newComputePipelineStateWithFunction:fm error:&error];
+    }
+    [fd release];
+    [fm release];
+    if (!g_arenaHizFromDepth || !g_arenaHizDown)
+      dbg("arena: hi-z pipelines missing, occlusion culling off\n");
+    MTLTextureDescriptor *fbd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                                    width:1
+                                                                                   height:1
+                                                                                mipmapped:NO];
+    fbd.usage = MTLTextureUsageShaderRead;
+    fbd.storageMode = MTLStorageModePrivate;
+    g_arenaHizFallback = [g_device newTextureWithDescriptor:fbd];
+  }
   NSString *names[3] = {@"terrain_cull_reset", @"terrain_cull", @"terrain_cull_finish"};
   id<MTLComputePipelineState> *targets[3] = {&g_arenaCullReset, &g_arenaCullMain, &g_arenaCullFinish};
   for (int i = 0; i < 3; i++) {
@@ -8012,6 +8083,113 @@ static void mr_arena_fill_cull_frame(ArenaCullFrame &f, uint32_t sectionCount, u
   f.sectionCount = sectionCount;
   f.listCapacity = listCap;
   f.pad = 0;
+  memset(f.prevViewProj, 0, sizeof(f.prevViewProj));
+  memset(f.prevOffset, 0, sizeof(f.prevOffset));
+  f.hizSize[0] = f.hizSize[1] = 0;
+  f.hizMips = 0;
+  f.hizFlags = 0;
+  ArenaHizSnap built;
+  {
+    std::lock_guard<std::mutex> hl(g_arenaHizMutex);
+    built = g_arenaHizBuilt;
+  }
+  uint64_t frameNow = g_backendFrameInProgress.load(std::memory_order_acquire);
+  double ox = g_camX - built.cam[0], oy = g_camY - built.cam[1], oz = g_camZ - built.cam[2];
+  if (g_arenaHizEnabled && built.valid && g_arenaHizTex && built.frame + 1 == frameNow &&
+      ox * ox + oy * oy + oz * oz < 16.0 * 16.0) {
+    for (int c = 0; c < 4; c++)
+      for (int r = 0; r < 4; r++) {
+        float sum = 0;
+        for (int k = 0; k < 4; k++)
+          sum += built.proj[k * 4 + r] * built.mv[c * 4 + k];
+        f.prevViewProj[c * 4 + r] = sum;
+      }
+    f.prevOffset[0] = (float)(fx + f.camFrac[0] - built.cam[0]);
+    f.prevOffset[1] = (float)(fy + f.camFrac[1] - built.cam[1]);
+    f.prevOffset[2] = (float)(fz + f.camFrac[2] - built.cam[2]);
+    f.hizSize[0] = g_arenaHizDepthW;
+    f.hizSize[1] = g_arenaHizDepthH;
+    f.hizMips = g_arenaHizMips;
+    f.hizFlags = 1u | (built.reverse ? 2u : 0u);
+  }
+}
+
+void mr_arena_hiz_build(id<MTLCommandBuffer> cmd, id<MTLTexture> depth) {
+  if (!cmd || !depth || !g_arenaHizEnabled || !g_arenaHizFromDepth || !g_arenaHizDown || !g_device)
+    return;
+  ArenaHizSnap snap;
+  {
+    std::lock_guard<std::mutex> hl(g_arenaHizMutex);
+    snap = g_arenaHizPending;
+    g_arenaHizPending.valid = false;
+  }
+  uint64_t frameNow = g_backendFrameInProgress.load(std::memory_order_acquire);
+  if (!snap.valid || snap.frame != frameNow)
+    return;
+  if (depth.pixelFormat != MTLPixelFormatDepth32Float || depth.textureType != MTLTextureType2D ||
+      depth.sampleCount != 1 || (depth.usage & MTLTextureUsageShaderRead) == 0 ||
+      depth.storageMode == MTLStorageModeMemoryless) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      dbg("arena: terrain depth not readable (fmt=%d usage=%d), hi-z off\n", (int)depth.pixelFormat,
+          (int)depth.usage);
+    }
+    return;
+  }
+  uint32_t dw = (uint32_t)depth.width, dh = (uint32_t)depth.height;
+  if (!g_arenaHizTex || dw != g_arenaHizDepthW || dh != g_arenaHizDepthH) {
+    for (auto &v : g_arenaHizViews) {
+      [v release];
+      v = nil;
+    }
+    [g_arenaHizTex release];
+    g_arenaHizTex = nil;
+    uint32_t w = std::max(1u, dw / 2), h = std::max(1u, dh / 2);
+    uint32_t mips = 1;
+    while (mips < 16 && ((w >> mips) > 0 || (h >> mips) > 0))
+      mips++;
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                                 width:w
+                                                                                height:h
+                                                                             mipmapped:YES];
+    d.mipmapLevelCount = mips;
+    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    d.storageMode = MTLStorageModePrivate;
+    g_arenaHizTex = [g_device newTextureWithDescriptor:d];
+    if (!g_arenaHizTex)
+      return;
+    g_arenaHizTex.label = @"metalrender terrain hi-z";
+    for (uint32_t m = 0; m < mips; m++)
+      g_arenaHizViews[m] = [g_arenaHizTex newTextureViewWithPixelFormat:MTLPixelFormatR32Float
+                                                            textureType:MTLTextureType2D
+                                                                 levels:NSMakeRange(m, 1)
+                                                                 slices:NSMakeRange(0, 1)];
+    g_arenaHizMips = mips;
+    g_arenaHizDepthW = dw;
+    g_arenaHizDepthH = dh;
+  }
+  id<MTLComputeCommandEncoder> ce = [cmd computeCommandEncoder];
+  if (!ce)
+    return;
+  ce.label = @"metalrender terrain hi-z";
+  uint32_t reverse = snap.reverse ? 1u : 0u;
+  [ce setBytes:&reverse length:sizeof(reverse) atIndex:0];
+  [ce setComputePipelineState:g_arenaHizFromDepth];
+  [ce setTexture:depth atIndex:0];
+  [ce setTexture:g_arenaHizViews[0] atIndex:1];
+  [ce dispatchThreads:MTLSizeMake(g_arenaHizViews[0].width, g_arenaHizViews[0].height, 1)
+      threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+  [ce setComputePipelineState:g_arenaHizDown];
+  for (uint32_t m = 1; m < g_arenaHizMips; m++) {
+    [ce setTexture:g_arenaHizViews[m - 1] atIndex:0];
+    [ce setTexture:g_arenaHizViews[m] atIndex:1];
+    [ce dispatchThreads:MTLSizeMake(g_arenaHizViews[m].width, g_arenaHizViews[m].height, 1)
+        threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+  }
+  [ce endEncoding];
+  std::lock_guard<std::mutex> hl(g_arenaHizMutex);
+  g_arenaHizBuilt = snap;
 }
 
 static bool mr_arena_box_visible(const ArenaCullFrame &f, const float lo[3], const float hi[3]) {
@@ -8051,7 +8229,7 @@ static bool mr_arena_unit_keep(const ArenaUnitRecord &unit, const float cam[3], 
 
 static void mr_arena_cpu_cull(const ArenaCullFrame &f, const ArenaSectionRecord *secs, const ArenaUnitRecord *units,
                               uint32_t *lists, uint32_t *args, uint64_t &quadsOut, uint64_t &unitsOut) {
-  uint32_t counts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  uint32_t counts[kArenaLists] = {};
   uint64_t quads = 0, kept = 0;
   for (uint32_t s = 0; s < f.sectionCount; s++) {
     ArenaSectionRecord sec = secs[s];
@@ -8073,7 +8251,7 @@ static void mr_arena_cpu_cull(const ArenaCullFrame &f, const ArenaSectionRecord 
       if (!mr_arena_unit_keep(unit, cam, rel, f))
         continue;
       uint32_t layer = (unit.meta >> 10) & 3u;
-      if (layer > 1)
+      if (layer > 2)
         continue;
       uint32_t n = (unit.meta & 31u) + 1u;
       uint32_t cls = n <= 4 ? 0 : (n <= 8 ? 1 : (n <= 16 ? 2 : 3));
@@ -8090,7 +8268,7 @@ static void mr_arena_cpu_cull(const ArenaCullFrame &f, const ArenaSectionRecord 
   }
   if (args) {
     static const uint32_t classVerts[4] = {24, 48, 96, 192};
-    for (int li = 0; li < 8; li++) {
+    for (int li = 0; li < kArenaLists; li++) {
       args[li * 5 + 0] = classVerts[li & 3];
       args[li * 5 + 1] = std::min(counts[li], f.listCapacity);
       args[li * 5 + 2] = 0;
@@ -8160,18 +8338,20 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nTerrainPrepare(JNI
       [ce setBuffer:argsBuf offset:0 atIndex:3];
       [ce setBuffer:fb.lists offset:0 atIndex:4];
       [ce setBuffer:statsBuf offset:0 atIndex:5];
+      [ce setTexture:(frame.hizFlags != 0u ? g_arenaHizTex : g_arenaHizFallback) atIndex:0];
       NSUInteger groups = (frame.sectionCount + 63) / 64;
       [ce dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
       [ce setComputePipelineState:g_arenaCullFinish];
       [ce setBuffer:argsBuf offset:0 atIndex:0];
       [ce setBytes:&frame length:sizeof(frame) atIndex:1];
-      [ce dispatchThreads:MTLSizeMake(8, 1, 1) threadsPerThreadgroup:MTLSizeMake(8, 1, 1)];
+      [ce dispatchThreads:MTLSizeMake(kArenaLists, 1, 1) threadsPerThreadgroup:MTLSizeMake(kArenaLists, 1, 1)];
       [ce endEncoding];
       bool oracle = g_arenaOracle;
       [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
         const uint32_t *st = (const uint32_t *)[statsBuf contents];
         long long gpuQuads = (long long)st[1];
         g_arenaDrawnQuads.store(gpuQuads, std::memory_order_relaxed);
+        g_arenaHizCulled.store((long long)st[2], std::memory_order_relaxed);
         if (oracle) {
           long long cpuQuads = g_arenaOracleCpuQuads[slot].load(std::memory_order_relaxed);
           double diff = 0.0;
@@ -8191,7 +8371,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nTerrainPrepare(JNI
     } else if (g_arenaGpuCull) {
       uint32_t *a = (uint32_t *)[argsBuf contents];
       static const uint32_t classVerts[4] = {24, 48, 96, 192};
-      for (int li = 0; li < 8; li++) {
+      for (int li = 0; li < kArenaLists; li++) {
         a[li * 5 + 0] = classVerts[li & 3];
         a[li * 5 + 1] = 0;
         a[li * 5 + 2] = 0;
@@ -8209,6 +8389,7 @@ static void mr_arena_encode(id<MTLRenderCommandEncoder> enc) {
   ArenaFrameBufs &fb = g_arenaFrame[g_arenaDrawSlot];
   if (!fb.valid || !fb.arena || !fb.sprites)
     return;
+  g_arenaWaterSlot = g_arenaDrawSlot;
   g_arenaDrawSlot = -1;
   if (g_depthState)
     [enc setDepthStencilState:g_depthState];
@@ -8243,6 +8424,48 @@ static void mr_arena_encode(id<MTLRenderCommandEncoder> enc) {
           indirectBufferOffset:(NSUInteger)li * 20];
     g_drawCallCount++;
   }
+}
+
+static void mr_arena_encode_water(id<MTLRenderCommandEncoder> enc) {
+  int slot = g_arenaWaterSlot;
+  g_arenaWaterSlot = -1;
+  if (!g_arenaReady || slot < 0 || !g_pipelineArenaWater || !g_depthStateNoWrite)
+    return;
+  ArenaFrameBufs &fb = g_arenaFrame[slot];
+  if (!fb.valid || !fb.arena || !fb.sprites)
+    return;
+  [enc setDepthStencilState:g_depthStateNoWrite];
+  [enc setFrontFacingWinding:mr_ext_winding()];
+  [enc setCullMode:MTLCullModeNone];
+  [enc setDepthBias:0.0f slopeScale:0.0f clamp:0.0f];
+  [enc setVertexBytes:g_projMatrix length:64 atIndex:1];
+  [enc setVertexBytes:g_mvMatrix length:64 atIndex:2];
+  float camPos[4] = {0.0f, 0.0f, 0.0f, g_skyBrightness};
+  [enc setVertexBytes:camPos length:16 atIndex:3];
+  struct {
+    int32_t camBlock[4];
+    float camFrac[4];
+  } tf;
+  memcpy(tf.camBlock, fb.camBlock, sizeof(tf.camBlock));
+  memcpy(tf.camFrac, fb.camFrac, sizeof(tf.camFrac));
+  [enc setVertexBytes:&tf length:sizeof(tf) atIndex:4];
+  [enc setVertexBuffer:fb.arena offset:0 atIndex:5];
+  [enc setVertexBuffer:fb.units offset:0 atIndex:6];
+  [enc setVertexBuffer:fb.sections offset:0 atIndex:7];
+  [enc setVertexBuffer:fb.sprites offset:0 atIndex:8];
+  [enc setFragmentBytes:&g_fogUniforms length:sizeof(g_fogUniforms) atIndex:6];
+  [enc setRenderPipelineState:mr_ext_pso(g_pipelineArenaWater)];
+  for (int li = 8; li < kArenaLists; li++) {
+    [enc setVertexBuffer:fb.lists offset:(NSUInteger)li * fb.listCap * 8 atIndex:0];
+    [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                     indexType:MTLIndexTypeUInt16
+                   indexBuffer:g_arenaQuadIdx
+             indexBufferOffset:0
+                indirectBuffer:g_arenaArgs[slot]
+          indirectBufferOffset:(NSUInteger)li * 20];
+    g_drawCallCount++;
+  }
+  g_currentPipeline = nil;
 }
 
 static void mr_apply_external_state(id<MTLRenderCommandEncoder> enc, int width, int height) {
@@ -8280,6 +8503,16 @@ static void mr_release_external_encoder() {
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetArenaHizCull(JNIEnv *, jclass, jboolean enabled) {
+  g_arenaHizEnabled = enabled == JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nGetArenaHizCulled(JNIEnv *, jclass) {
+  return (jlong)g_arenaHizCulled.load(std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nSetReverseZ(
     JNIEnv *, jclass, jboolean enabled) {
   g_reverseZ = enabled == JNI_TRUE;
@@ -8294,6 +8527,17 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nTerrainExternalDra
   @autoreleasepool {
     mr_apply_external_state(enc, width, height);
     mr_arena_encode(enc);
+    {
+      std::lock_guard<std::mutex> hl(g_arenaHizMutex);
+      memcpy(g_arenaHizPending.proj, g_projMatrix, sizeof(g_arenaHizPending.proj));
+      memcpy(g_arenaHizPending.mv, g_mvMatrix, sizeof(g_arenaHizPending.mv));
+      g_arenaHizPending.cam[0] = g_camX;
+      g_arenaHizPending.cam[1] = g_camY;
+      g_arenaHizPending.cam[2] = g_camZ;
+      g_arenaHizPending.frame = g_backendFrameInProgress.load(std::memory_order_acquire);
+      g_arenaHizPending.reverse = g_reverseZ;
+      g_arenaHizPending.valid = true;
+    }
     jint drawn = Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawAllVisibleChunks(
         env, cls, 1, indexBuffer);
     mr_release_external_encoder();
@@ -8309,6 +8553,7 @@ Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nWaterExternalDraw(
     return;
   @autoreleasepool {
     mr_apply_external_state(enc, width, height);
+    mr_arena_encode_water(enc);
     Java_com_pebbles_1boon_metalrender_nativebridge_NativeBridge_nDrawDeferredWaterPass(env, cls, 1);
     mr_release_external_encoder();
   }

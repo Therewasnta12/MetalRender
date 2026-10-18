@@ -142,7 +142,109 @@ struct TerrainCullFrame {
     uint   sectionCount;
     uint   listCapacity;
     uint   pad;
+    float4x4 prevViewProj;
+    float4 prevOffset;
+    uint2  hizSize;
+    uint   hizMips;
+    uint   hizFlags;
 };
+
+inline bool terr_hiz_occluded(constant TerrainCullFrame& f, texture2d<float> hiz, float3 lo, float3 hi) {
+    if ((f.hizFlags & 1u) == 0u) {
+        return false;
+    }
+    bool rev = (f.hizFlags & 2u) != 0u;
+    float2 nmin = float2(1e9f);
+    float2 nmax = float2(-1e9f);
+    float nearest = rev ? 0.0f : 1.0f;
+    for (uint i = 0u; i < 8u; i++) {
+        float3 c = float3((i & 1u) ? hi.x : lo.x, (i & 2u) ? hi.y : lo.y, (i & 4u) ? hi.z : lo.z);
+        float4 clip = f.prevViewProj * float4(c + f.prevOffset.xyz, 1.0f);
+        if (clip.w <= 0.05f) {
+            return false;
+        }
+        float3 ndc = clip.xyz / clip.w;
+        nmin = min(nmin, ndc.xy);
+        nmax = max(nmax, ndc.xy);
+        nearest = rev ? max(nearest, ndc.z) : min(nearest, ndc.z);
+    }
+    if (any(nmin < float2(-1.0f)) || any(nmax > float2(1.0f))) {
+        return false;
+    }
+    float2 full = float2(f.hizSize);
+    float2 pmin = float2(nmin.x * 0.5f + 0.5f, 0.5f - nmax.y * 0.5f) * full;
+    float2 pmax = float2(nmax.x * 0.5f + 0.5f, 0.5f - nmin.y * 0.5f) * full;
+    float extent = max(max(pmax.x - pmin.x, pmax.y - pmin.y), 1.0f);
+    uint level = uint(max(ceil(log2(extent)) - 1.0f, 0.0f));
+    level = min(level, f.hizMips - 1u);
+    float scale = exp2(-(float(level) + 1.0f));
+    int2 lim = int2(int(hiz.get_width(level)) - 1, int(hiz.get_height(level)) - 1);
+    int2 a = clamp(int2(floor(pmin * scale)), int2(0), lim);
+    int2 b = clamp(int2(floor(pmax * scale)), int2(0), lim);
+    if (b.x - a.x > 1 || b.y - a.y > 1) {
+        return false;
+    }
+    float far0 = hiz.read(uint2(a), level).r;
+    float far1 = hiz.read(uint2(b.x, a.y), level).r;
+    float far2 = hiz.read(uint2(a.x, b.y), level).r;
+    float far3 = hiz.read(uint2(b), level).r;
+    if (rev) {
+        return nearest < min(min(far0, far1), min(far2, far3));
+    }
+    return nearest > max(max(far0, far1), max(far2, far3));
+}
+
+inline uint2 terr_hiz_span(uint d, uint dn, uint sn) {
+    uint s0 = min(d * 2u, sn - 1u);
+    uint s1 = d == dn - 1u ? sn - 1u : min(s0 + 1u, sn - 1u);
+    return uint2(s0, s1);
+}
+
+kernel void terrain_hiz_from_depth(
+    depth2d<float, access::read> src [[texture(0)]],
+    texture2d<float, access::write> dst [[texture(1)]],
+    constant uint& reverse [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint dw = dst.get_width();
+    uint dh = dst.get_height();
+    if (gid.x >= dw || gid.y >= dh) {
+        return;
+    }
+    uint2 sx = terr_hiz_span(gid.x, dw, src.get_width());
+    uint2 sy = terr_hiz_span(gid.y, dh, src.get_height());
+    float r = reverse != 0u ? 1.0f : 0.0f;
+    for (uint y = sy.x; y <= sy.y; y++) {
+        for (uint x = sx.x; x <= sx.y; x++) {
+            float d = src.read(uint2(x, y));
+            r = reverse != 0u ? min(r, d) : max(r, d);
+        }
+    }
+    dst.write(float4(r), gid);
+}
+
+kernel void terrain_hiz_downsample(
+    texture2d<float, access::read> src [[texture(0)]],
+    texture2d<float, access::write> dst [[texture(1)]],
+    constant uint& reverse [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint dw = dst.get_width();
+    uint dh = dst.get_height();
+    if (gid.x >= dw || gid.y >= dh) {
+        return;
+    }
+    uint2 sx = terr_hiz_span(gid.x, dw, src.get_width());
+    uint2 sy = terr_hiz_span(gid.y, dh, src.get_height());
+    float r = reverse != 0u ? 1.0f : 0.0f;
+    for (uint y = sy.x; y <= sy.y; y++) {
+        for (uint x = sx.x; x <= sx.y; x++) {
+            float d = src.read(uint2(x, y)).r;
+            r = reverse != 0u ? min(r, d) : max(r, d);
+        }
+    }
+    dst.write(float4(r), gid);
+}
 
 inline bool terr_box_visible(constant TerrainCullFrame& f, float3 lo, float3 hi) {
     for (uint i = 0u; i < 4u; i++) {
@@ -155,7 +257,8 @@ inline bool terr_box_visible(constant TerrainCullFrame& f, float3 lo, float3 hi)
     return true;
 }
 
-inline bool terr_unit_keep(UnitRecord unit, float3 cam, float3 rel, constant TerrainCullFrame& f) {
+inline bool terr_unit_keep(UnitRecord unit, float3 cam, float3 rel, constant TerrainCullFrame& f,
+                           texture2d<float> hiz) {
     uint bucket = (unit.meta >> 5) & 7u;
     if (bucket < 6u) {
         float plane = float(unit.plane) / 256.0f;
@@ -174,16 +277,17 @@ inline bool terr_unit_keep(UnitRecord unit, float3 cam, float3 rel, constant Ter
     uint b = unit.box;
     float3 lo = float3(float(b & 31u), float((b >> 5) & 31u), float((b >> 10) & 31u)) - 8.0f;
     float3 hi = float3(float((b >> 15) & 31u), float((b >> 20) & 31u), float((b >> 25) & 31u)) - 8.0f;
-    return terr_box_visible(f, rel + lo, rel + hi);
+    return terr_box_visible(f, rel + lo, rel + hi) && !terr_hiz_occluded(f, hiz, rel + lo, rel + hi);
 }
 
 constant uint kTerrClassVerts[4] = {24u, 48u, 96u, 192u};
+constant uint kTerrLists = 12u;
 
 inline uint terr_list_index(uint meta) {
     uint layer = (meta >> 10) & 3u;
     uint n = (meta & 31u) + 1u;
     uint cls = n <= 4u ? 0u : (n <= 8u ? 1u : (n <= 16u ? 2u : 3u));
-    return layer < 2u ? layer * 4u + cls : 8u;
+    return layer < 3u ? layer * 4u + cls : kTerrLists;
 }
 
 kernel void terrain_cull_reset(
@@ -194,7 +298,7 @@ kernel void terrain_cull_reset(
     if (tid != 0u) {
         return;
     }
-    for (uint i = 0u; i < 8u; i++) {
+    for (uint i = 0u; i < kTerrLists; i++) {
         atomic_store_explicit(&args[i * 5u + 0u], kTerrClassVerts[i & 3u], memory_order_relaxed);
         atomic_store_explicit(&args[i * 5u + 1u], 0u, memory_order_relaxed);
         atomic_store_explicit(&args[i * 5u + 2u], 0u, memory_order_relaxed);
@@ -203,6 +307,7 @@ kernel void terrain_cull_reset(
     }
     atomic_store_explicit(&stats[0], 0u, memory_order_relaxed);
     atomic_store_explicit(&stats[1], 0u, memory_order_relaxed);
+    atomic_store_explicit(&stats[2], 0u, memory_order_relaxed);
 }
 
 kernel void terrain_cull(
@@ -212,14 +317,16 @@ kernel void terrain_cull(
     device atomic_uint* args [[buffer(3)]],
     device uint2* lists [[buffer(4)]],
     device atomic_uint* stats [[buffer(5)]],
+    texture2d<float> hiz [[texture(0)]],
     uint section [[thread_position_in_grid]]
 ) {
-    uint n[8] = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
+    uint n[12] = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
     uint quads = 0u;
     SectionRecord sec;
     float3 rel = float3(0.0f);
     float3 cam = float3(0.0f);
     bool visible = false;
+    bool occluded = false;
     if (section < f.sectionCount) {
         sec = sections[section];
         if ((sec.flags & 3u) == 3u) {
@@ -229,6 +336,10 @@ kernel void terrain_cull(
             float dz = rel.z + 8.0f;
             float lim = f.viewDist + 16.0f;
             visible = (dx * dx + dz * dz <= lim * lim) && terr_box_visible(f, rel, rel + 16.0f);
+            if (visible && terr_hiz_occluded(f, hiz, rel, rel + 16.0f)) {
+                visible = false;
+                occluded = true;
+            }
             cam = -rel;
         }
     }
@@ -236,16 +347,16 @@ kernel void terrain_cull(
         for (uint u = 0u; u < sec.unitCount; u++) {
             UnitRecord unit = units[sec.firstUnit + u];
             uint li = terr_list_index(unit.meta);
-            if (li < 8u && terr_unit_keep(unit, cam, rel, f)) {
+            if (li < kTerrLists && terr_unit_keep(unit, cam, rel, f, hiz)) {
                 n[li]++;
                 quads += (unit.meta & 31u) + 1u;
             }
         }
     }
-    uint base[8];
-    uint prefix[8];
+    uint base[12];
+    uint prefix[12];
     uint kept = 0u;
-    for (uint i = 0u; i < 8u; i++) {
+    for (uint i = 0u; i < kTerrLists; i++) {
         uint total = simd_sum(n[i]);
         prefix[i] = simd_prefix_exclusive_sum(n[i]);
         kept += n[i];
@@ -261,17 +372,21 @@ kernel void terrain_cull(
         atomic_fetch_add_explicit(&stats[0], unitsKept, memory_order_relaxed);
         atomic_fetch_add_explicit(&stats[1], totalQuads, memory_order_relaxed);
     }
+    uint occludedCount = simd_sum(occluded ? 1u : 0u);
+    if (simd_is_first() && occludedCount > 0u) {
+        atomic_fetch_add_explicit(&stats[2], occludedCount, memory_order_relaxed);
+    }
     if (!visible || kept == 0u) {
         return;
     }
-    uint w[8];
-    for (uint i = 0u; i < 8u; i++) {
+    uint w[12];
+    for (uint i = 0u; i < kTerrLists; i++) {
         w[i] = base[i] + prefix[i];
     }
     for (uint u = 0u; u < sec.unitCount; u++) {
         UnitRecord unit = units[sec.firstUnit + u];
         uint li = terr_list_index(unit.meta);
-        if (li >= 8u || !terr_unit_keep(unit, cam, rel, f)) {
+        if (li >= kTerrLists || !terr_unit_keep(unit, cam, rel, f, hiz)) {
             continue;
         }
         if (w[li] < f.listCapacity) {
@@ -286,7 +401,7 @@ kernel void terrain_cull_finish(
     constant TerrainCullFrame& f [[buffer(1)]],
     uint tid [[thread_position_in_grid]]
 ) {
-    if (tid >= 8u) {
+    if (tid >= kTerrLists) {
         return;
     }
     uint count = atomic_load_explicit(&args[tid * 5u + 1u], memory_order_relaxed);
