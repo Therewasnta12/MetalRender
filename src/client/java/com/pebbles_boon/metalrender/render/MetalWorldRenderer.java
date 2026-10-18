@@ -1354,7 +1354,12 @@ public class MetalWorldRenderer {
             new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
     private final int[] gpuLodRequestBuf = new int[4 * 512];
 
+    private static boolean gpuLodWishesMissing;
+
     private void refreshGpuLodWishes() {
+        if (gpuLodWishesMissing) {
+            return;
+        }
         try {
             NativeBridge.nArenaSetLodRings(CustomChunkMesher.lodNearRing(), CustomChunkMesher.lodMidRing());
             int n = NativeBridge.nArenaPollLodRequests(gpuLodRequestBuf);
@@ -1367,6 +1372,8 @@ public class MetalWorldRenderer {
                 gpuLodWishes.put(packChunkKey(gpuLodRequestBuf[b], gpuLodRequestBuf[b + 1], gpuLodRequestBuf[b + 2]),
                         gpuLodRequestBuf[b + 3]);
             }
+        } catch (UnsatisfiedLinkError missing) {
+            gpuLodWishesMissing = true;
         } catch (Throwable ignored) {
         }
     }
@@ -1378,10 +1385,18 @@ public class MetalWorldRenderer {
         return gpuLodWishes.getOrDefault(packChunkKey(cx, cy, cz), fallback);
     }
 
+    private static boolean gpuSeenAgeMissing;
+
     private static boolean gpuSeenRecently(int cx, int cy, int cz) {
+        if (gpuSeenAgeMissing) {
+            return true;
+        }
         int age;
         try {
             age = NativeBridge.nArenaSeenAge(cx, cy, cz);
+        } catch (UnsatisfiedLinkError missing) {
+            gpuSeenAgeMissing = true;
+            return true;
         } catch (Throwable t) {
             return true;
         }
@@ -1712,6 +1727,8 @@ public class MetalWorldRenderer {
         return EXTREME_DISTANCE_SCAN_VERTICAL_RANGE;
     }
 
+    private final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap scannedChunkStamps = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+
     private void queueChunkSectionsIfMissing(ClientLevel world, int chunkX,
             int chunkZ, int playerSectionY,
             int chunkDistance) {
@@ -1727,6 +1744,12 @@ public class MetalWorldRenderer {
         }
         LevelChunkSection[] sections = chunk.getSections();
         int maxVerticalRange = getScanVerticalRange(chunkDistance);
+        long scanKey = ((long) chunkX << 32) ^ (chunkZ & 0xFFFFFFFFL);
+        long scanStamp = chunkMesher.getConnectivityGeneration() * 0x9E3779B97F4A7C15L
+                + System.identityHashCode(chunk) * 31L + playerSectionY * 1000003L + maxVerticalRange;
+        if (scanStamp != 0L && scannedChunkStamps.get(scanKey) == scanStamp)
+            return;
+        boolean allMeshed = true;
         int highestNonAirSection = Integer.MIN_VALUE;
         if (maxVerticalRange != Integer.MAX_VALUE) {
             for (int sy = sections.length - 1; sy >= 0; sy--) {
@@ -1751,9 +1774,12 @@ public class MetalWorldRenderer {
                 }
             }
             long sectionKey = packChunkKey(chunkX, worldY, chunkZ);
-            if (pendingBuildSet.contains(sectionKey))
+            if (pendingBuildSet.contains(sectionKey)) {
+                allMeshed = false;
                 continue;
+            }
             if (!chunkMesher.hasMesh(chunkX, worldY, chunkZ)) {
+                allMeshed = false;
                 chunkMesher.noteSectionAvailable(chunkX, worldY, chunkZ);
                 if (pendingBuildSet.add(sectionKey)) {
                     sortedListDirty = true;
@@ -1764,6 +1790,11 @@ public class MetalWorldRenderer {
                     }
                 }
             }
+        }
+        if (allMeshed && scanStamp != 0L) {
+            if (scannedChunkStamps.size() > 50000)
+                scannedChunkStamps.clear();
+            scannedChunkStamps.put(scanKey, scanStamp);
         }
     }
 
