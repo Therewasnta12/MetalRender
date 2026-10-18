@@ -31,6 +31,21 @@ public class CullingOrcreator {
     private static final int[] SECTION_DY = {-1, 1, 0, 0, 0, 0};
     private static final int[] SECTION_DZ = {0, 0, -1, 1, 0, 0};
 
+    private static final boolean DIRECTIONAL_WALK =
+            com.pebbles_boon.metalrender.config.MetalRenderConfig.getBool("metalrender.directionalCaveWalk", true);
+
+    private static int outwardExits(int x, int y, int z, int camX, int camY, int camZ) {
+        if (!DIRECTIONAL_WALK) return 63;
+        int m = 0;
+        if (y <= camY) m |= 1;
+        if (y >= camY) m |= 2;
+        if (z <= camZ) m |= 4;
+        if (z >= camZ) m |= 8;
+        if (x <= camX) m |= 16;
+        if (x >= camX) m |= 32;
+        return m;
+    }
+
     private static long sectionKey(int x, int y, int z) {
         return ((long) (x & 0x3fffff) << 42) | ((long) (y & 0xfffff) << 22) | (z & 0x3fffff);
     }
@@ -112,7 +127,8 @@ public class CullingOrcreator {
             int x = (int) (key >> 42), y = (int) (key << 22 >> 44), z = (int) (key << 42 >> 42);
             int index = ((x - x0) * h + y - minSecY) * w + z - z0;
             sectionQueued[index] = 0;
-            int freshExits = sectionPendingExits[index] & ~sectionExpanded[index];
+            int freshExits = sectionPendingExits[index] & ~sectionExpanded[index]
+                    & outwardExits(x, y, z, camSecX, camSecY, camSecZ);
             sectionExpanded[index] |= (byte) freshExits;
             for (int direction = 0; direction < 6; direction++) {
                 if ((freshExits & (1 << direction)) == 0) continue;
@@ -131,7 +147,8 @@ public class CullingOrcreator {
                 sectionVisits[nextIndex] |= nextIncoming;
                 int nextExits = (int) (sectionMasks[nextIndex] >>> ((direction ^ 1) * 6)) & 63;
                 sectionPendingExits[nextIndex] |= (byte) nextExits;
-                if (sectionQueued[nextIndex] == 0 && (nextExits & ~sectionExpanded[nextIndex]) != 0) {
+                if (sectionQueued[nextIndex] == 0 && (nextExits & ~sectionExpanded[nextIndex]
+                        & outwardExits(nx, ny, nz, camSecX, camSecY, camSecZ)) != 0) {
                     sectionQueue[tail] = sectionKey(nx, ny, nz);
                     if (++tail == size) tail = 0;
                     queued++;
