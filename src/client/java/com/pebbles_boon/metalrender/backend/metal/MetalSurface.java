@@ -11,8 +11,11 @@ final class MetalSurface {
     private int width;
     private int height;
     private boolean vsync;
+    static final boolean UNCAPPED =
+            com.pebbles_boon.metalrender.config.MetalRenderConfig.getBool("metalrender.uncapped", true);
 
     MetalSurface(long window, boolean vsync) {
+        vsync = vsync && !UNCAPPED;
         this.window = window;
         this.vsync = vsync;
         long nsWindow = GLFWNativeCocoa.glfwGetCocoaWindow(window);
@@ -59,6 +62,7 @@ final class MetalSurface {
     }
 
     void setVsync(boolean vsync) {
+        vsync = vsync && !UNCAPPED;
         if (this.vsync != vsync) {
             this.vsync = vsync;
             MetalNative.nSurfaceSetVsync(layer, vsync);
