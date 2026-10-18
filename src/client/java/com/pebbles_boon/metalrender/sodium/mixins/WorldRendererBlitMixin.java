@@ -111,6 +111,29 @@ public class WorldRendererBlitMixin {
         }
     }
 
+    @Unique
+    private static final boolean metalrender$SKIP_IDLE_OUTLINE = com.pebbles_boon.metalrender.config.MetalRenderConfig
+            .getBool("metalrender.skipIdleOutlineBlit", true);
+
+    @Unique
+    private boolean metalrender$anyOutline = true;
+
+    @Inject(method = "addMainPass", at = @At("HEAD"), require = 0)
+    private void metalrender$noteOutline(com.mojang.blaze3d.framegraph.FrameGraphBuilder frameGraph,
+            net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame frame,
+            GpuBufferSlice fogBuffer, LevelRenderState renderState,
+            net.minecraft.util.profiling.ProfilerFiller profiler,
+            net.minecraft.client.renderer.chunk.ChunkSectionsToRender sections, CallbackInfo ci) {
+        metalrender$anyOutline = frame == null || frame.hasAnyOutline();
+    }
+
+    @Inject(method = "doEntityOutline", at = @At("HEAD"), cancellable = true, require = 0)
+    private void metalrender$skipIdleOutline(CallbackInfo ci) {
+        if (metalrender$SKIP_IDLE_OUTLINE && !metalrender$anyOutline && MetalRenderClient.isBackendMode()) {
+            ci.cancel();
+        }
+    }
+
     @Inject(method = "render", at = @At("RETURN"), require = 1)
     private void metalrender$endWorldFrame(
             GraphicsResourceAllocator allocator, DeltaTracker tickCounter,
