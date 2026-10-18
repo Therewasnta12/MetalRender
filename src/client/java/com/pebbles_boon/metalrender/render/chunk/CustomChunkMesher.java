@@ -396,6 +396,9 @@ public class CustomChunkMesher {
     }
     private static final boolean QUAD_CENSUS = MetalRenderConfig.getBool("metalrender.quadCensus", false);
     private static final ThreadLocal<QuadTiers.Section> TIER_SECTION = ThreadLocal.withInitial(QuadTiers.Section::new);
+    private static final boolean ARENA_WATER = MetalRenderConfig.getBool("metalrender.arenaWater", true);
+    private static final boolean MERGE_FLUID_TOPS = MetalRenderConfig.getBool("metalrender.mergeFluidTops", true);
+    private static final ThreadLocal<long[]> FLUID_TOP_GRID = ThreadLocal.withInitial(() -> new long[16 * 16 * 16]);
     private static final java.util.concurrent.atomic.AtomicInteger TIER_VERIFIED = new java.util.concurrent.atomic.AtomicInteger();
     private static volatile boolean arenaReady;
 
@@ -420,6 +423,7 @@ public class CustomChunkMesher {
             boolean gpuCull = MetalRenderConfig.getBool("metalrender.gpuCull", true);
             boolean oracle = MetalRenderConfig.getBool("metalrender.cullOracle", false);
             arenaReady = NativeBridge.nArenaConfigure(renderDistanceChunks, capMb, gpuCull, oracle);
+            NativeBridge.nSetArenaHizCull(MetalRenderConfig.getBool("metalrender.hizCull", true));
             MetalLogger.info("terrain arena %s (cap %d MB, gpuCull=%s, oracle=%s)", arenaReady ? "ready" : "unavailable",
                     capMb, gpuCull, oracle);
         } catch (Throwable t) {
@@ -592,13 +596,19 @@ public class CustomChunkMesher {
         MetalLogger.info("builder pools: perf=%d immediate=%d background=%d", perf, immediateThreadCount, backgroundThreadCount);
 
         final java.util.concurrent.ThreadFactory immediateFactory = r -> {
-            Thread t = new Thread(r, "MetalRender-MeshBuilder-Immediate");
+            Thread t = new Thread(() -> {
+                lowerBuilderQos();
+                r.run();
+            }, "MetalRender-MeshBuilder-Immediate");
             t.setDaemon(true);
             t.setPriority(Thread.NORM_PRIORITY - 1);
             return t;
         };
         final java.util.concurrent.ThreadFactory backgroundFactory = r -> {
-            Thread t = new Thread(r, "MetalRender-MeshBuilder-Background");
+            Thread t = new Thread(() -> {
+                lowerBuilderQos();
+                r.run();
+            }, "MetalRender-MeshBuilder-Background");
             t.setDaemon(true);
             t.setPriority(Thread.NORM_PRIORITY - 2);
             return t;
@@ -614,6 +624,18 @@ public class CustomChunkMesher {
                 java.util.concurrent.TimeUnit.SECONDS,
                 new java.util.concurrent.PriorityBlockingQueue<>(), backgroundFactory);
         this.backgroundPool.allowCoreThreadTimeOut(true);
+    }
+
+    private static volatile boolean qosUnavailable;
+
+    private static void lowerBuilderQos() {
+        if (qosUnavailable || !NativeBridge.isLibLoaded())
+            return;
+        try {
+            NativeBridge.nSetThreadQos(0x11);
+        } catch (UnsatisfiedLinkError e) {
+            qosUnavailable = true;
+        }
     }
 
     public long getGlobalIndexBuffer() {
@@ -1343,7 +1365,6 @@ public class CustomChunkMesher {
     }
 
     public ChunkMeshData getMeshSnapshotAt(int index) {
-        refreshCachedMeshSnapshot();
         return index >= 0 && index < cachedMeshSnapshot.size()
                 ? cachedMeshSnapshot.get(index)
                 : null;
@@ -1765,9 +1786,10 @@ public class CustomChunkMesher {
         byte[] paddedShade = data.paddedShade;
         byte[] paddedEmission = data.paddedEmission;
         int[] biomeTints = data.biomeTints;
+        Arrays.fill(paddedBlockStates, 0);
         boolean hasAnyBlock = false;
         boolean far = lodTier >= 1;
-        int effR = far ? 1 : PADDED_RADIUS;
+        int effR = 1;
         int effMin = PADDED_RADIUS - effR;
         int effMax = PADDED_RADIUS + SECTION_SIZE + effR;
         Object2IntOpenHashMap<BlockState> bsIdCacheLocal = BS_ID_CACHE.get();
@@ -1825,6 +1847,8 @@ public class CustomChunkMesher {
                 }
             }
         } else {
+            BlockState lastState = null;
+            int lastPi = -1;
             for (int y = 0; y < SECTION_SIZE; y++) {
                 for (int z = 0; z < SECTION_SIZE; z++) {
                     for (int x = 0; x < SECTION_SIZE; x++) {
@@ -1839,7 +1863,14 @@ public class CustomChunkMesher {
                                 s = Blocks.AIR.defaultBlockState();
                             }
                         }
-                        int pi = palette.indexFor(s);
+                        int pi;
+                        if (s == lastState && lastPi >= 0) {
+                            pi = lastPi;
+                        } else {
+                            pi = palette.indexFor(s);
+                            lastState = s;
+                            lastPi = pi;
+                        }
                         int sid = 0;
                         try {
                             sid = palette.ids.get(pi);
@@ -1931,22 +1962,7 @@ public class CustomChunkMesher {
                         if (uniformInner) {
                             state = uniformHolder[0];
                         } else {
-                            int lx = px - PADDED_RADIUS;
-                            int ly = py - PADDED_RADIUS;
-                            int lz = pz - PADDED_RADIUS;
-                            BlockState s2 = null;
-                            try {
-                                s2 = localStates.get(lx, ly, lz);
-                            } catch (Exception e) {
-                                try {
-                                    mutablePos.set(baseX + lx, baseY + ly, baseZ + lz);
-                                    s2 = world.getBlockState(mutablePos);
-                                    mutablePos.set(wx, wy, wz);
-                                } catch (Exception ignored) {
-                                    s2 = Blocks.AIR.defaultBlockState();
-                                }
-                            }
-                            state = s2;
+                            state = stateId != 0 ? StateTable.state(stateId) : Blocks.AIR.defaultBlockState();
                         }
                     } else {
                         BlockState bs = null;
@@ -2517,6 +2533,9 @@ public class CustomChunkMesher {
 
             MeshBuilder builder = new MeshBuilder(vertexHolder, waterHolder, context.blockModels,
                     snapshot, context, chunkX, chunkY, chunkZ, lodTier);
+            boolean tiersNow = tiersActive();
+            boolean arenaWater = tiersNow && ARENA_WATER;
+            builder.arenaWater = arenaWater;
 
             builder.build();
 
@@ -2541,15 +2560,24 @@ public class CustomChunkMesher {
             boolean tiered = false;
             int tierPayloadBytes = 0;
             QuadTiers.Section tierSection = null;
-            if (tiersActive()) {
+            int arenaWaterQuads = 0;
+            if (tiersNow) {
                 tiered = true;
-                if (opaqueQuadCount > 0) {
+                arenaWaterQuads = arenaWater ? waterQuadCount : 0;
+                if (opaqueQuadCount + arenaWaterQuads > 0) {
                     tierSection = TIER_SECTION.get();
                     boolean verify = VERIFY_COMPRESS && TIER_VERIFIED.getAndIncrement() < 256;
-                    QuadTiers.build(tierSection, vertexHolder.buf, facingQuadCounts, opaqueQuadCount, true, verify);
+                    ByteBuffer waterSrc = null;
+                    if (arenaWaterQuads > 0) {
+                        waterSrc = waterHolder.buf.duplicate().order(waterHolder.buf.order());
+                        waterSrc.flip();
+                    }
+                    QuadTiers.build(tierSection, vertexHolder.buf, facingQuadCounts, opaqueQuadCount, waterSrc,
+                            arenaWaterQuads, true, verify);
                     tierPayloadBytes = tierSection.quadBytes;
                 }
             }
+            int legacyWaterQuads = waterQuadCount - arenaWaterQuads;
 
             int opaqueFormat = VERTEX_FORMAT_UNCOMPRESSED;
             int opaqueBytes = tiered ? 0 : opaqueBytesUncompressed;
@@ -2582,7 +2610,7 @@ public class CustomChunkMesher {
                 }
             }
 
-            if (waterQuadCount > 0) {
+            if (legacyWaterQuads > 0) {
                 ByteBuffer waterBuffer = waterHolder.buf;
                 waterBuffer.flip();
                 int waterBytes = waterBuffer.remaining();
@@ -2617,7 +2645,7 @@ public class CustomChunkMesher {
             vertexBuffer = vertexHolder.buf;
             vertexBuffer.flip();
             long visibilityMask = computeVisibilityMask(snapshot.paddedBlockStates);
-            int dataLen = opaqueBytes + waterQuadCount * 4 * VERTEX_STRIDE;
+            int dataLen = opaqueBytes + legacyWaterQuads * 4 * VERTEX_STRIDE;
 
             if (isTaskCancelled(key, generation, globalGeneration)) {
                 return;
@@ -2667,7 +2695,7 @@ public class CustomChunkMesher {
                 if (tiered) {
                     boolean published = tierSection != null
                             ? NativeBridge.nArenaPublish(chunkX, chunkY, chunkZ, lodTier, tierSection.quads,
-                                    tierSection.quadBytes, tierSection.units, tierSection.unitCount, opaqueQuadCount)
+                                    tierSection.quadBytes, tierSection.units, tierSection.unitCount, opaqueQuadCount + arenaWaterQuads)
                             : NativeBridge.nArenaPublish(chunkX, chunkY, chunkZ, lodTier, null, 0, null, 0, 0);
                     if (!published) {
                         MetalLogger.error("terrain arena publish failed [%d,%d,%d]", chunkX, chunkY, chunkZ);
@@ -2696,7 +2724,7 @@ public class CustomChunkMesher {
                     int idx = batchRegCount * BATCH_REG_STRIDE;
                     int[] regFacing = tiered ? new int[7] : facingQuadCounts;
                     batchRegData[idx] = (chunkX & 0xFFFFFFFFL) | ((long) chunkY << 32);
-                    batchRegData[idx + 1] = (chunkZ & 0xFFFFFFFFL) | ((long) (tiered ? waterQuadCount : quadCount) << 32);
+                    batchRegData[idx + 1] = (chunkZ & 0xFFFFFFFFL) | ((long) (tiered ? legacyWaterQuads : quadCount) << 32);
                     batchRegData[idx + 2] = bufferHandle;
                     batchRegData[idx + 3] = visibilityMask;
                     batchRegData[idx + 4] = ((tiered ? 0 : opaqueQuadCount) & 0xFFFFFFFFL)
@@ -2774,6 +2802,9 @@ public class CustomChunkMesher {
 
         int opaqueQuadCount = 0;
         int waterQuadCount = 0;
+        boolean arenaWater;
+        private long[] fluidTops;
+        private int fluidTopCount;
         private final float[] cornerHeights = new float[4];
         private boolean[] greedyCovered = null;
         private int greedyMergedQuads = 0;
@@ -2839,7 +2870,8 @@ public class CustomChunkMesher {
 
                         pos.set(chunkX * 16 + x, chunkY * 16 + y, chunkZ * 16 + z);
 
-                        if (state.getRenderShape() == net.minecraft.world.level.block.RenderShape.MODEL) {
+                        if (!isEnclosedCube(stateId, x, y, z)
+                                && state.getRenderShape() == net.minecraft.world.level.block.RenderShape.MODEL) {
                             if (blockModels != null) {
                                 BlockStateModel model = getCachedModel(state);
                                 if (model != null) {
@@ -2855,10 +2887,32 @@ public class CustomChunkMesher {
                     }
                 }
             }
+            if (fluidTopCount > 0) {
+                emitMergedFluidTops();
+            }
             if (greedyMergedQuads > 0 && MetalRenderConfig.isDeepDebugActive()) {
                 MetalLogger.info("greedy lod%d: merged=%d faces=%d",
                         lodTier, greedyMergedQuads, greedyCoveredFaces);
             }
+        }
+
+        private boolean isEnclosedCube(int stateId, int x, int y, int z) {
+            int sf = StateTable.flags(stateId);
+            if ((sf & StateTable.FULL_FACES) != StateTable.FULL_FACES || (sf & StateTable.LEAVES) != 0)
+                return false;
+            return facesUs(getPaddedBlockStateId(x, y - 1, z), 1 << 1)
+                    && facesUs(getPaddedBlockStateId(x, y + 1, z), 1 << 0)
+                    && facesUs(getPaddedBlockStateId(x, y, z - 1), 1 << 3)
+                    && facesUs(getPaddedBlockStateId(x, y, z + 1), 1 << 2)
+                    && facesUs(getPaddedBlockStateId(x - 1, y, z), 1 << 5)
+                    && facesUs(getPaddedBlockStateId(x + 1, y, z), 1 << 4);
+        }
+
+        private static boolean facesUs(int nid, int faceBit) {
+            if (nid == 0)
+                return false;
+            int nf = StateTable.flags(nid);
+            return (nf & faceBit) != 0 && (nf & StateTable.LEAVES) == 0;
         }
 
         private boolean isGreedyCovered(int x, int y, int z, Direction dir) {
@@ -2914,7 +2968,8 @@ public class CustomChunkMesher {
             greedyCovered = new boolean[SECTION_SIZE * SECTION_SIZE * SECTION_SIZE * 6];
             greedyMergedQuads = 0;
             greedyCoveredFaces = 0;
-            java.util.HashMap<Integer, GreedyStateInfo> stateCache = new java.util.HashMap<>(128);
+            it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<GreedyStateInfo> stateCache =
+                    new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>(128);
             for (Direction dir : ALL_DIRECTIONS) {
                 try {
                     greedyForDirection(dir, stateCache);
@@ -2923,7 +2978,20 @@ public class CustomChunkMesher {
             }
         }
 
-        private GreedyStateInfo getGreedyStateInfo(int stateId, java.util.HashMap<Integer, GreedyStateInfo> cache) {
+        private static final boolean GREEDY_IGNORE_ROTATION =
+                MetalRenderConfig.getBool("metalrender.greedyIgnoreRotation", true);
+        private static final int GREEDY_TINT_STEP_MID = Integer.getInteger("metalrender.greedyTintStepMid", 8);
+        private static final int GREEDY_TINT_STEP_FAR = Integer.getInteger("metalrender.greedyTintStepFar", 16);
+
+        private static int snapTint(int rgb, int step) {
+            int r = Math.min(255, ((rgb >> 16 & 0xFF) + step / 2) / step * step);
+            int g = Math.min(255, ((rgb >> 8 & 0xFF) + step / 2) / step * step);
+            int b = Math.min(255, ((rgb & 0xFF) + step / 2) / step * step);
+            return (r << 16) | (g << 8) | b;
+        }
+
+        private GreedyStateInfo getGreedyStateInfo(int stateId,
+                it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<GreedyStateInfo> cache) {
             GreedyStateInfo cached = cache.get(stateId);
             if (cached != null)
                 return cached;
@@ -2952,7 +3020,8 @@ public class CustomChunkMesher {
                     GreedyTemplate tB = extractGreedyTemplate(state, model, dir, dummyB);
                     if (tB == null)
                         continue;
-                    if (tA.uvHash != tB.uvHash || tA.posHash != tB.posHash
+                    boolean sameRotation = tA.uvHash == tB.uvHash && tA.posHash == tB.posHash;
+                    if ((!sameRotation && !GREEDY_IGNORE_ROTATION)
                             || tA.spriteHash != tB.spriteHash || tA.tintIndex != tB.tintIndex
                             || tA.tinted != tB.tinted) {
                         continue;
@@ -3124,6 +3193,23 @@ public class CustomChunkMesher {
                         && alpha == m.alpha;
             }
 
+            boolean matches(GreedyTemplate t, int tint, int lt, int a) {
+                return spriteHash == t.spriteHash && uvHash == t.uvHash && posHash == t.posHash
+                        && tintIndex == t.tintIndex && tintColor == tint && light == lt && alpha == a;
+            }
+
+            static int hash(int spriteHash, int uvHash, int posHash, int tintIndex, int tintColor, int light,
+                    int alpha) {
+                int h = spriteHash;
+                h = 31 * h + uvHash;
+                h = 31 * h + posHash;
+                h = 31 * h + tintIndex;
+                h = 31 * h + tintColor;
+                h = 31 * h + light;
+                h = 31 * h + alpha;
+                return h;
+            }
+
             @Override
             public int hashCode() {
                 int h = spriteHash;
@@ -3138,8 +3224,12 @@ public class CustomChunkMesher {
         }
 
         private void greedyForDirection(Direction dir,
-                java.util.HashMap<Integer, GreedyStateInfo> stateCache) {
+                it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<GreedyStateInfo> stateCache) {
             int dirIdx = dir.get3DDataValue();
+            int sx = dir.getStepX();
+            int sy = dir.getStepY();
+            int sz = dir.getStepZ();
+            int towardUs = 1 << dir.getOpposite().get3DDataValue();
             float shade = 1.0f;
             try {
                 if (context != null && context.faceShade != null && dirIdx < context.faceShade.length)
@@ -3148,7 +3238,7 @@ public class CustomChunkMesher {
             }
             int[] mask = new int[256];
             GreedyMaterial[] matByIdx = new GreedyMaterial[256];
-            java.util.HashMap<GreedyMaterial, Integer> matToIdx = new java.util.HashMap<>(64);
+            int[] matSlots = new int[512];
             int nextMatIdx = 1;
             boolean[] consumed = new boolean[256];
 
@@ -3156,8 +3246,10 @@ public class CustomChunkMesher {
                 java.util.Arrays.fill(mask, 0);
                 java.util.Arrays.fill(matByIdx, null);
                 java.util.Arrays.fill(consumed, false);
-                matToIdx.clear();
+                if (nextMatIdx > 1)
+                    java.util.Arrays.fill(matSlots, 0);
                 nextMatIdx = 1;
+                int lastIdx = 0;
 
                 for (int v = 0; v < SECTION_SIZE; v++) {
                     for (int u = 0; u < SECTION_SIZE; u++) {
@@ -3182,6 +3274,12 @@ public class CustomChunkMesher {
                         int stateId = getPaddedBlockStateId(x, y, z);
                         if (stateId == 0)
                             continue;
+                        int nid = getPaddedBlockStateId(x + sx, y + sy, z + sz);
+                        if (nid != 0) {
+                            int nf = StateTable.flags(nid);
+                            if ((nf & towardUs) != 0 && ((nf | StateTable.flags(stateId)) & StateTable.LEAVES) == 0)
+                                continue;
+                        }
                         BlockState state;
                         try {
                             state = getStateById(stateId);
@@ -3225,6 +3323,9 @@ public class CustomChunkMesher {
                             } catch (Exception ignored) {
                                 tintColor = 0xFFFFFF;
                             }
+                            int step = lodTier >= 2 ? GREEDY_TINT_STEP_FAR : GREEDY_TINT_STEP_MID;
+                            if (step > 1)
+                                tintColor = snapTint(tintColor, step);
                         } else if (state.getBlock() == Blocks.GRASS_BLOCK && dir.getAxis() != Direction.Axis.Y) {
                             continue;
                         }
@@ -3234,15 +3335,33 @@ public class CustomChunkMesher {
                                 alpha = 0xFE;
                         } catch (Exception ignored) {
                         }
-                        GreedyMaterial key = new GreedyMaterial(template.spriteHash, template.uvHash,
-                                template.posHash, template.tintIndex, tintColor, light, alpha, template, shade);
-                        Integer idx = matToIdx.get(key);
-                        if (idx == null) {
-                            if (nextMatIdx >= matByIdx.length)
-                                continue;
-                            idx = nextMatIdx++;
-                            matToIdx.put(key, idx);
-                            matByIdx[idx] = key;
+                        int idx = 0;
+                        if (lastIdx != 0 && matByIdx[lastIdx].matches(template, tintColor, light, alpha)) {
+                            idx = lastIdx;
+                        } else {
+                            int h = GreedyMaterial.hash(template.spriteHash, template.uvHash, template.posHash,
+                                    template.tintIndex, tintColor, light, alpha);
+                            int slot = (h ^ (h >>> 16)) & 511;
+                            while (true) {
+                                int cand = matSlots[slot];
+                                if (cand == 0)
+                                    break;
+                                if (matByIdx[cand].matches(template, tintColor, light, alpha)) {
+                                    idx = cand;
+                                    break;
+                                }
+                                slot = (slot + 1) & 511;
+                            }
+                            if (idx == 0) {
+                                if (nextMatIdx >= matByIdx.length)
+                                    continue;
+                                idx = nextMatIdx++;
+                                matSlots[slot] = idx;
+                                matByIdx[idx] = new GreedyMaterial(template.spriteHash, template.uvHash,
+                                        template.posHash, template.tintIndex, tintColor, light, alpha, template,
+                                        shade);
+                            }
+                            lastIdx = idx;
                         }
                         mask[v * SECTION_SIZE + u] = idx;
                     }
@@ -3372,23 +3491,7 @@ public class CustomChunkMesher {
         }
 
         private BlockState getStateById(int stateId) {
-            it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<BlockState> cache = STATE_BY_ID_CACHE
-                    .get();
-            BlockState state = cache.get(stateId);
-            if (state == null) {
-                try {
-                    state = Block.stateById(stateId);
-                } catch (RuntimeException ignored) {
-                    state = Blocks.AIR.defaultBlockState();
-                }
-                if (state == null) {
-                    state = Blocks.AIR.defaultBlockState();
-                }
-                if (cache.size() < STATE_BY_ID_CACHE_CAP) {
-                    cache.put(stateId, state);
-                }
-            }
-            return state;
+            return StateTable.state(stateId);
         }
 
         private BlockStateModel getCachedModel(BlockState state) {
@@ -3579,29 +3682,26 @@ public class CustomChunkMesher {
             int nx = x + direction.getStepX();
             int ny = y + direction.getStepY();
             int nz = z + direction.getStepZ();
-            BlockState neighbor = getPaddedBlockState(nx, ny, nz);
-            if (neighbor == null)
+            int neighborId = getPaddedBlockStateId(nx, ny, nz);
+            if (neighborId == 0)
                 return false;
+            int nf = StateTable.flags(neighborId);
+            if ((nf & StateTable.LEAVES) == 0
+                    && (nf & (1 << direction.getOpposite().get3DDataValue())) != 0
+                    && !(state.getBlock() instanceof LeavesBlock)) {
+                return true;
+            }
+            BlockState neighbor = getStateById(neighborId);
             if (neighbor.isAir())
                 return false;
-            DIAG_FACE_TESTS.incrementAndGet();
             boolean currentIsLeaves = state.getBlock() instanceof LeavesBlock;
             boolean neighborIsLeaves = neighbor.getBlock() instanceof LeavesBlock;
             if (currentIsLeaves || neighborIsLeaves) {
-                boolean leavesCulled = isOpaqueForCulling(neighbor);
-                if (leavesCulled) {
-                    DIAG_FACE_CULLED.incrementAndGet();
-                }
-                return leavesCulled;
+                return isOpaqueForCulling(neighbor);
             }
-            DIAG_FACE_SHAPE.incrementAndGet();
             com.pebbles_boon.metalrender.culling.ShapeComparisonCache cache = SHAPE_CACHE.get();
-            boolean shapeCulled = com.pebbles_boon.metalrender.culling.BlockFaceCulling.shouldCullFace(state, neighbor,
+            return com.pebbles_boon.metalrender.culling.BlockFaceCulling.shouldCullFace(state, neighbor,
                     direction, cache);
-            if (shapeCulled) {
-                DIAG_FACE_CULLED.incrementAndGet();
-            }
-            return shapeCulled;
         }
 
         private boolean isOpaqueForCulling(BlockState state) {
@@ -3650,6 +3750,12 @@ public class CustomChunkMesher {
                 cornerHeights[3] = sampleFluidCornerHeight(lx, ly, lz, 0, 1, isLava);
             }
 
+            if (arenaWater) {
+                for (int i = 0; i < 4; i++) {
+                    cornerHeights[i] = Math.round(cornerHeights[i] * 128.0f) / 128.0f;
+                }
+            }
+
             byte light = computeFluidLight(lx, ly, lz);
             int fluidColor = isLava ? 0xFFFFFF : getBiomeTint(lx, ly, lz);
             byte r = (byte) ((fluidColor >> 16) & 0xFF);
@@ -3659,7 +3765,13 @@ public class CustomChunkMesher {
 
             if (upVisible) {
                 float flowAngle = computeFluidFlowAngle(fluid, pos);
-                renderFluidTop(lx, ly, lz, cornerHeights, r, g, b, a, light, flowAngle, isLava);
+                float h = cornerHeights[0];
+                if (arenaWater && MERGE_FLUID_TOPS && Float.isNaN(flowAngle) && h > 0.0f
+                        && cornerHeights[1] == h && cornerHeights[2] == h && cornerHeights[3] == h) {
+                    deferFluidTop(lx, ly, lz, h, fluidColor, light, isLava);
+                } else {
+                    renderFluidTop(lx, ly, lz, cornerHeights, r, g, b, a, light, flowAngle, isLava);
+                }
             }
 
             for (Direction dir : ALL_DIRECTIONS) {
@@ -3679,6 +3791,80 @@ public class CustomChunkMesher {
                     renderFluidBottom(lx, ly, lz, r, g, b, a, light, isLava);
                 }
             }
+        }
+
+        private void deferFluidTop(int lx, int ly, int lz, float h, int rgb, byte light, boolean lava) {
+            if (fluidTops == null) {
+                fluidTops = FLUID_TOP_GRID.get();
+                java.util.Arrays.fill(fluidTops, 0L);
+            }
+            int hq = Math.round(h * 128.0f);
+            fluidTops[(ly * 16 + lz) * 16 + lx] = (1L << 62) | ((long) hq << 40) | ((lava ? 1L : 0L) << 39)
+                    | ((long) (light & 0xFF) << 24) | (rgb & 0xFFFFFFL);
+            fluidTopCount++;
+        }
+
+        private void emitMergedFluidTops() {
+            long[] grid = fluidTops;
+            for (int y = 0; y < 16; y++) {
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        int at = (y * 16 + z) * 16 + x;
+                        long key = grid[at];
+                        if (key == 0L) {
+                            continue;
+                        }
+                        int w = 1;
+                        while (x + w < 16 && grid[at + w] == key) {
+                            w++;
+                        }
+                        int d = 1;
+                        grow:
+                        while (z + d < 16) {
+                            int row = (y * 16 + z + d) * 16 + x;
+                            for (int k = 0; k < w; k++) {
+                                if (grid[row + k] != key) {
+                                    break grow;
+                                }
+                            }
+                            d++;
+                        }
+                        for (int dz = 0; dz < d; dz++) {
+                            int row = (y * 16 + z + dz) * 16 + x;
+                            for (int k = 0; k < w; k++) {
+                                grid[row + k] = 0L;
+                            }
+                        }
+                        boolean lava = ((key >> 39) & 1L) != 0L;
+                        int hq = (int) ((key >> 40) & 0xFFL);
+                        byte light = (byte) ((key >> 24) & 0xFFL);
+                        byte r = (byte) ((key >> 16) & 0xFF);
+                        byte g = (byte) ((key >> 8) & 0xFF);
+                        byte b = (byte) (key & 0xFF);
+                        byte a = lava ? (byte) 0xFF : WATER_ALPHA;
+                        short px0 = (short) (x * 256);
+                        short px1 = (short) ((x + w) * 256);
+                        short pz0 = (short) (z * 256);
+                        short pz1 = (short) ((z + d) * 256);
+                        short py = (short) (y * 256 + hq * 2);
+                        TextureAtlasSprite sprite = lava ? context.lavaStillSprite : context.waterStillSprite;
+                        short u0 = mapFluidU(sprite, 0.0f);
+                        short u1 = mapFluidU(sprite, 1.0f);
+                        short v0 = mapFluidV(sprite, 0.0f);
+                        short v1 = mapFluidV(sprite, 1.0f);
+                        emitVertex(waterBuffer, px0, py, pz0, u0, v0, r, g, b, a, light, (byte) 1);
+                        emitVertex(waterBuffer, px0, py, pz1, u0, v1, r, g, b, a, light, (byte) 1);
+                        emitVertex(waterBuffer, px1, py, pz1, u1, v1, r, g, b, a, light, (byte) 1);
+                        emitVertex(waterBuffer, px1, py, pz0, u1, v0, r, g, b, a, light, (byte) 1);
+                        waterQuadCount++;
+                        if (w * d > 1) {
+                            greedyMergedQuads++;
+                        }
+                        x += w - 1;
+                    }
+                }
+            }
+            fluidTopCount = 0;
         }
 
         private byte computeFluidLight(int lx, int ly, int lz) {
@@ -4763,26 +4949,6 @@ public class CustomChunkMesher {
     }
 
     private static boolean isOpaqueState(int stateId) {
-        it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<BlockState> cache = STATE_BY_ID_CACHE
-                .get();
-        BlockState state = cache.get(stateId);
-        if (state == null) {
-            try {
-                state = Block.stateById(stateId);
-            } catch (RuntimeException ignored) {
-                state = Blocks.AIR.defaultBlockState();
-            }
-            if (state == null) {
-                state = Blocks.AIR.defaultBlockState();
-            }
-            if (cache.size() < STATE_BY_ID_CACHE_CAP) {
-                cache.put(stateId, state);
-            }
-        }
-        try {
-            return state.isSolidRender();
-        } catch (RuntimeException ignored) {
-            return false;
-        }
+        return stateId != 0 && (StateTable.flags(stateId) & StateTable.SOLID_RENDER) != 0;
     }
 }

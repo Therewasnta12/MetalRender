@@ -184,6 +184,8 @@ public final class QuadTiers {
         }
     }
 
+    public static final int WATER_ALPHA = 168;
+
     public static int quant(float f) {
         return ((int) (f * 65535f)) & 0xFFFF;
     }
@@ -798,6 +800,12 @@ public final class QuadTiers {
 
     public static void build(Section s, ByteBuffer src, int[] bucketCounts, int quadTotal, boolean tiers,
             boolean verify) {
+        build(s, src, bucketCounts, quadTotal, null, 0, tiers, verify);
+    }
+
+    public static void build(Section s, ByteBuffer src, int[] bucketCounts, int opaqueTotal, ByteBuffer water,
+            int waterTotal, boolean tiers, boolean verify) {
+        int quadTotal = opaqueTotal + waterTotal;
         s.reset(quadTotal);
         SpriteTable sprites = spriteTable;
         Quad q = s.quad;
@@ -807,12 +815,23 @@ public final class QuadTiers {
         long b = 0;
         long c = 0;
         for (int i = 0; i < quadTotal; i++) {
-            while (bucket < 6 && inBucket >= bucketCounts[bucket]) {
-                bucket++;
-                inBucket = 0;
+            boolean translucent = i >= opaqueTotal;
+            ByteBuffer qsrc = translucent ? water : src;
+            int qbase = (translucent ? i - opaqueTotal : i) * 4 * VERTEX_STRIDE;
+            if (translucent) {
+                bucket = 6;
+            } else {
+                while (bucket < 6 && inBucket >= bucketCounts[bucket]) {
+                    bucket++;
+                    inBucket = 0;
+                }
+                inBucket++;
             }
-            inBucket++;
-            q.load(src, i * 4 * VERTEX_STRIDE);
+            q.load(qsrc, qbase);
+            if (translucent && q.a[0] == WATER_ALPHA && q.a[1] == WATER_ALPHA && q.a[2] == WATER_ALPHA
+                    && q.a[3] == WATER_ALPHA) {
+                Arrays.fill(q.a, 0xFE);
+            }
             int tier = TIER_C;
             if (tiers) {
                 if (tryA(q, sprites, s.color, s.words)) {
@@ -843,8 +862,8 @@ public final class QuadTiers {
                 b++;
             } else {
                 for (int k = 0; k < 4; k++) {
-                    long w0 = src.getLong(i * 4 * VERTEX_STRIDE + k * VERTEX_STRIDE);
-                    long w1 = src.getLong(i * 4 * VERTEX_STRIDE + k * VERTEX_STRIDE + 8);
+                    long w0 = qsrc.getLong(qbase + k * VERTEX_STRIDE);
+                    long w1 = qsrc.getLong(qbase + k * VERTEX_STRIDE + 8);
                     tmp.putLong(w0);
                     tmp.putLong(w1);
                 }
@@ -853,7 +872,9 @@ public final class QuadTiers {
             s.qTier[i] = tier;
             s.qBucket[i] = bucket;
             int layer = 1;
-            if (q.a[0] == 0xFE) {
+            if (translucent) {
+                layer = 2;
+            } else if (q.a[0] == 0xFE) {
                 layer = 0;
             } else if (sprites != null) {
                 int sp = sprites.findContaining(q.uMin, q.vMin, q.uMax, q.vMax);
