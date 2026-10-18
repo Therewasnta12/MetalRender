@@ -158,7 +158,8 @@ public class MetalEntityRenderer {
         count++;
     }
 
-    public void buildMeshes(long ctx, java.util.List<BlockBreakingRenderState> breakingStates) {
+    public void buildMeshes(long ctx, java.util.List<BlockBreakingRenderState> breakingStates,
+            java.util.List<net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState> blockEntityStates) {
         if (!active || ctx == 0 || device == 0) {
             return;
         }
@@ -260,6 +261,22 @@ public class MetalEntityRenderer {
             }
         }
 
+        int beStart = metalVertexConsumer.getVertexCount();
+        for (net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState beState : blockEntityStates) {
+            try {
+                renderBlockEntity(beState, mc, camX, camY, camZ, delta);
+            } catch (Throwable e) {
+                if (blockEntityFailures++ < 10) {
+                    MetalLogger.warn("block entity fail: %s", e);
+                }
+            }
+        }
+
+        if (!blockEntityStates.isEmpty() && frameCount % 300 == 0) {
+            MetalLogger.info("[blockentity] states=%d verts=%d", blockEntityStates.size(),
+                    metalVertexConsumer.getVertexCount() - beStart);
+        }
+
         for (BlockBreakingRenderState breaking : breakingStates) {
             if (breaking.blockState().getRenderShape() != net.minecraft.world.level.block.RenderShape.MODEL) {
                 continue;
@@ -288,6 +305,34 @@ public class MetalEntityRenderer {
         }
     }
 
+    private int blockEntityFailures;
+
+    private void renderBlockEntity(net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState state,
+            Minecraft mc, double camX, double camY, double camZ, float tickDelta) {
+        if (state == null || state.blockPos == null) {
+            return;
+        }
+        int light = state.lightCoords != 0 ? state.lightCoords : 0x00F000F0;
+        if (reusableCmdQueue == null) {
+            reusableCmdQueue = new MetalRenderCommandQueue(metalVertexConsumer, light);
+        } else {
+            reusableCmdQueue.reset(metalVertexConsumer, light);
+        }
+        matrixStack.setIdentity();
+        matrixStack.translate(state.blockPos.getX() - camX, state.blockPos.getY() - camY,
+                state.blockPos.getZ() - camZ);
+        Camera camera = mc.gameRenderer.getMainCamera();
+        if (camera != null && camera.isInitialized()) {
+            camera.extractRenderState(reusableCameraRenderState, tickDelta);
+        }
+        mc.getBlockEntityRenderDispatcher().submit(state, matrixStack, reusableCmdQueue,
+                reusableCameraRenderState);
+        for (MetalRenderCommandQueue.DrawSegment segment : reusableCmdQueue.getSegments()) {
+            enqueueDraw(segment.startVertex, segment.vertexCount, 0,
+                    segment.glTextureId, segment.renderFlags);
+        }
+    }
+
     private EntityDrawCommand getOrCreateDrawCommand() {
         if (pendingDrawCount < pendingDrawPool.size()) {
             return pendingDrawPool.get(pendingDrawCount);
@@ -299,7 +344,6 @@ public class MetalEntityRenderer {
 
     private void enqueueEntityDraws(int startVertex, CapturedEntity captured,
             float hurtFactor) {
-
         if (reusableCmdQueue != null) {
             java.util.List<MetalRenderCommandQueue.DrawSegment> segs = reusableCmdQueue.getSegments();
             if (segs != null && !segs.isEmpty()) {
@@ -1119,7 +1163,8 @@ public class MetalEntityRenderer {
     }
 
     public void renderCapturedEntities(long ctx, boolean inWater,
-            java.util.List<BlockBreakingRenderState> breakingStates) {
+            java.util.List<BlockBreakingRenderState> breakingStates,
+            java.util.List<net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState> blockEntityStates) {
         if (!active || ctx == 0 || device == 0) {
             return;
         }
@@ -1141,7 +1186,7 @@ public class MetalEntityRenderer {
             lastEntityLogTime = now;
         }
 
-        buildMeshes(ctx, breakingStates);
+        buildMeshes(ctx, breakingStates, blockEntityStates);
         if (vtxCount == 0 || pendingDrawCount == 0) {
             return;
         }

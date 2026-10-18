@@ -172,7 +172,6 @@ public final class MetalRenderConfig {
                     metalFXTemporalEnabled = obj.get("enableMetalFXTemporal").getAsBoolean();
             }
         } catch (Exception e) {
-
         }
 
         cfg.enableMetalRendering = getBool("metalrender.enabled", cfg.enableMetalRendering);
@@ -185,7 +184,6 @@ public final class MetalRenderConfig {
     }
 
     public void save() {
-
         System.setProperty("metalrender.enabled", String.valueOf(enableMetalRendering));
         System.setProperty("metalrender.feature.icb",
                 String.valueOf(enableIndirectCommandBuffers));
@@ -245,7 +243,6 @@ public final class MetalRenderConfig {
             java.nio.file.Files.writeString(path,
                     new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(obj));
         } catch (Exception e) {
-
         }
     }
 
@@ -275,7 +272,6 @@ public final class MetalRenderConfig {
                 java.nio.file.Files.deleteIfExists(flagPath);
             }
         } catch (Exception e) {
-
         }
     }
 

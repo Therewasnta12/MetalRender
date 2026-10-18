@@ -37,7 +37,6 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 public class MetalRenderCommandQueue implements SubmitNodeCollector {
-
     public static final class DrawSegment {
         public int startVertex;
         public int vertexCount;
@@ -93,10 +92,11 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
         }
         int start = currentVertexCount();
         invokeSetupAnim(model, state);
-        invokeRenderToBuffer(model, matrices, light, overlay, color);
+        VertexConsumer target = sprite != null ? sprite.wrap(vertexConsumer) : vertexConsumer;
+        invokeRenderToBuffer(model, matrices, target, light, overlay, color);
         int end = currentVertexCount();
         if (start >= 0 && end > start) {
-            int glId = resolveRenderTypeTexture(layer);
+            int glId = resolveSpriteOrLayerTexture(sprite, layer);
             if (glId != 0) {
                 requestedGlTextureId = glId;
             }
@@ -116,10 +116,11 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
             ModelFeatureRenderer.CrumblingOverlay crumbling, int extra) {
         if (part != null && (visible || noCull)) {
             int start = currentVertexCount();
-            part.render(matrices, vertexConsumer, light, overlay, color);
+            VertexConsumer target = sprite != null ? sprite.wrap(vertexConsumer) : vertexConsumer;
+            part.render(matrices, target, light, overlay, color);
             int end = currentVertexCount();
             if (start >= 0 && end > start) {
-                int glId = resolveRenderTypeTexture(layer);
+                int glId = resolveSpriteOrLayerTexture(sprite, layer);
                 if (glId != 0) {
                     requestedGlTextureId = glId;
                 }
@@ -155,12 +156,21 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
         return 0;
     }
 
+    private static int resolveSpriteOrLayerTexture(TextureAtlasSprite sprite, RenderType layer) {
+        if (sprite != null && sprite.atlasLocation() != null) {
+            int glId = getTextureGlId(sprite.atlasLocation());
+            if (glId != 0) {
+                return glId;
+            }
+        }
+        return resolveRenderTypeTexture(layer);
+    }
+
     private static int resolveRenderTypeTexture(RenderType layer) {
         if (layer == null) {
             return 0;
         }
         try {
-
             java.lang.reflect.Field stateField = null;
             for (Class<?> c = layer.getClass(); c != null; c = c.getSuperclass()) {
                 try {
@@ -198,7 +208,6 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
                     continue;
                 }
                 try {
-
                     java.lang.reflect.Method locMethod = null;
                     try {
                         locMethod = binding.getClass().getDeclaredMethod("location");
@@ -263,7 +272,6 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
                             return gl.glId();
                         }
                         if (v != null) {
-
                             for (Class<?> c2 = v.getClass(); c2 != null
                                     && c2 != Object.class; c2 = c2.getSuperclass()) {
                                 for (java.lang.reflect.Field f2 : c2.getDeclaredFields()) {
@@ -659,7 +667,7 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
         }
     }
 
-    private void invokeRenderToBuffer(Model<?> model, PoseStack matrices,
+    private void invokeRenderToBuffer(Model<?> model, PoseStack matrices, VertexConsumer vertexConsumer,
             int light, int overlay, int color) {
         try {
             Method method = model.getClass().getMethod(

@@ -72,6 +72,9 @@ public class WorldRendererBlitMixin {
             } else {
                 metalrender$projection.set(positionMatrix);
             }
+            if (MetalRenderClient.isBackendMode()) {
+                CapturedMatrices.copyLevelProjection(metalrender$projection);
+            }
             Vec3 camPos = (cameraRenderState != null && cameraRenderState.pos != null)
                     ? cameraRenderState.pos
                     : camera.position();
@@ -134,7 +137,8 @@ public class WorldRendererBlitMixin {
             if (MetalRenderClient.isBackendMode()) {
                 worldRenderer.endFrameExternal();
             } else {
-                worldRenderer.endFrame(levelRenderState.blockBreakingRenderStates);
+                worldRenderer.endFrame(levelRenderState.blockBreakingRenderStates,
+                        levelRenderState.blockEntityRenderStates);
             }
             metalrender$endFrameCount++;
             if (metalrender$endFrameCount <= 3) {

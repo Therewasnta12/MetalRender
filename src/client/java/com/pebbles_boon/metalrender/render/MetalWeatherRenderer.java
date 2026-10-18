@@ -178,7 +178,6 @@ public class MetalWeatherRenderer {
 
             float alpha = (alphaScale + closeness * (0.5f - alphaScale)) * intensity;
             if (alpha < 0.1f) {
-
                 continue;
             }
             int color = ((int) (clamp01(alpha) * 255.0f) << 24) | 0x00FFFFFF;
@@ -227,7 +226,6 @@ public class MetalWeatherRenderer {
             float z1, float yBot,
             float uA, float uB, float vTopRow, float vBotRow,
             int color, int light) {
-
         float uf = uA - (float) Math.floor(uA);
         float[][] uPieces;
         if (uf < 1.0e-6f || uf > 1.0f - 1.0e-6f) {
@@ -259,7 +257,6 @@ public class MetalWeatherRenderer {
             float fa = va - (float) Math.floor(va);
             float fb = vb - (float) Math.floor(vb);
             if (fb == 0.0f && vb > va) {
-
                 fb = 1.0f;
             }
             for (float[] up : uPieces) {
@@ -284,7 +281,6 @@ public class MetalWeatherRenderer {
             float x2, float y2, float z2, float u2, float v2,
             float x3, float y3, float z3, float u3, float v3,
             int color, int light) {
-
         vert(x0, y0, z0, u0, v0, color, light);
         vert(x1, y1, z1, u1, v1, color, light);
         vert(x2, y2, z2, u2, v2, color, light);
@@ -333,7 +329,6 @@ public class MetalWeatherRenderer {
                 return h;
             }
         } catch (Throwable ignored) {
-
         }
         try {
             return NativeBridge.nGetParticlePipelineHandle(rendererHandle);

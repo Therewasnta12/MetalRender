@@ -33,7 +33,6 @@ import net.minecraft.server.level.ParticleStatus;
 import net.minecraft.util.ARGB;
 
 public class MetalRenderSettingsScreen extends Screen {
-
     private static final Identifier LOGO = Identifier.fromNamespaceAndPath("metalrender", "textures/metalrender_transparent.png");
 
     private static final class GlassBackdrop implements AutoCloseable {
@@ -808,7 +807,6 @@ public class MetalRenderSettingsScreen extends Screen {
     }
 
     private int sliderWidthFor(Row r) {
-
         int maxByCard = r.layoutW - 14 - 60 - 16 - 70 - 16;
         int w = Math.min(SLIDER_W, maxByCard);
         return Math.max(70, Math.min(SLIDER_W, w));
@@ -1395,7 +1393,6 @@ public class MetalRenderSettingsScreen extends Screen {
     }
 
     private boolean isFullWidth(Row r) {
-
         return r.type == RT.SECTION || r.type == RT.THEME || r.type == RT.SLIDER;
     }
 

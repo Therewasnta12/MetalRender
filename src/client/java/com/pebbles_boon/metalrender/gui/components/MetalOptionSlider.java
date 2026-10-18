@@ -9,7 +9,6 @@ import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.network.chat.Component;
 
 public class MetalOptionSlider extends AbstractSliderButton {
-
     private static final int C_KNOB = 0xFFFFFFFF;
     private static final int C_KNOB_SHADOW = 0x40000000;
 

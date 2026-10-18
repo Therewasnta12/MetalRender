@@ -6,9 +6,12 @@ import com.pebbles_boon.metalrender.gui.MetalRenderSettingsScreen;
 import com.pebbles_boon.metalrender.render.MetalWorldRenderer;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
+import com.pebbles_boon.metalrender.render.CapturedMatrices;
+import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(targets = "net.minecraft.client.renderer.GameRenderer", remap = false)
@@ -33,5 +36,14 @@ public abstract class GameRendererMixin {
         if (!MetalWorldRenderer.shouldBlitAt("before_hand"))
             return;
         worldRenderer.forceBlitNow();
+    }
+
+    @ModifyArg(method = "renderLevel", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/ProjectionMatrixBuffer;getBuffer(Lorg/joml/Matrix4f;)"
+                    + "Lcom/mojang/blaze3d/buffers/GpuBufferSlice;"),
+            index = 0, require = 0)
+    private Matrix4f metalrender$captureLevelProjection(Matrix4f projection) {
+        CapturedMatrices.captureLevelProjection(projection);
+        return projection;
     }
 }

@@ -6,7 +6,22 @@ public final class CapturedMatrices {
     private static final Matrix4f projection = new Matrix4f();
     private static final Matrix4f modelView = new Matrix4f();
     private static volatile double camX, camY, camZ;
+    private static final Matrix4f levelProjection = new Matrix4f();
+    private static volatile boolean levelProjectionValid = false;
     private static volatile boolean valid = false;
+
+    public static void captureLevelProjection(Matrix4f proj) {
+        levelProjection.set(proj);
+        levelProjectionValid = true;
+    }
+
+    public static boolean copyLevelProjection(Matrix4f dest) {
+        if (!levelProjectionValid) {
+            return false;
+        }
+        dest.set(levelProjection);
+        return true;
+    }
 
     public static void capture(Matrix4f proj, Matrix4f mv, double cx, double cy,
             double cz) {

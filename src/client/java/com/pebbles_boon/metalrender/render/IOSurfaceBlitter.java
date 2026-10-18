@@ -338,7 +338,6 @@ public final class IOSurfaceBlitter {
     }
 
     private boolean blitToIntermediateImpl(int width, int height) {
-
         int prevReadFbo = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
         int prevDrawFbo = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
         boolean scissor = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);

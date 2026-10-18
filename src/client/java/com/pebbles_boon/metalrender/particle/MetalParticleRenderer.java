@@ -279,7 +279,6 @@ public class MetalParticleRenderer {
         if (particlePipeline == 0) {
             particlePipeline = NativeBridge.nGetParticlePipelineHandle(renderer.getHandle());
             if (particlePipeline == 0) {
-
                 long fb = cachedParticleFallbackPipeline;
                 if (fb == 0) {
                     fb = NativeBridge.nGetEntityTranslucentPipelineHandle(
@@ -412,7 +411,6 @@ public class MetalParticleRenderer {
     }
 
     private void buildBillboardQuad(CapturedParticle cp, Quaternionf camRot) {
-
         float size = cp.scale * 0.5f;
         float x = cp.x, y = cp.y, z = cp.z;
         bbRot.set(camRot);

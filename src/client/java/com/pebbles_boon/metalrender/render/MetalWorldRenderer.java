@@ -997,7 +997,8 @@ public class MetalWorldRenderer {
         }
     }
 
-    public void endFrame(java.util.List<net.minecraft.client.renderer.state.level.BlockBreakingRenderState> breakingStates) {
+    public void endFrame(java.util.List<net.minecraft.client.renderer.state.level.BlockBreakingRenderState> breakingStates,
+            java.util.List<net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState> blockEntityStates) {
         MetalRenderer renderer = MetalRenderClient.getRenderer();
         if (renderer == null || !renderer.isAvailable())
             return;
@@ -1017,9 +1018,8 @@ public class MetalWorldRenderer {
                 } catch (Exception ignored) {
                 }
             }
-            entityRenderer.renderCapturedEntities(frameCtx, inWater, breakingStates);
+            entityRenderer.renderCapturedEntities(frameCtx, inWater, breakingStates, blockEntityStates);
             if (camera != null) {
-
                 try {
                     cloudRenderer.render(frameCtx, camera, tickDelta);
                 } catch (Exception ignored) {
@@ -2593,7 +2593,6 @@ public class MetalWorldRenderer {
     }
 
     private void updateLodRecencyEviction(Minecraft mc) {
-
         if (mc == null || mc.player == null) {
             return;
         }

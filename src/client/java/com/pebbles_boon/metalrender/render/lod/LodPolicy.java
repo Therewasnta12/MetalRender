@@ -34,7 +34,6 @@ public final class LodPolicy {
     public static final int RECENCY_STALE_TICKS = 120;
 
     public static final class ChunkState {
-
         public int visibleStreak;
 
         public int staleScans;

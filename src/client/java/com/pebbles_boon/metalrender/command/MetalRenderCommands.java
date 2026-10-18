@@ -1,9 +1,12 @@
 package com.pebbles_boon.metalrender.command;
 
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.config.MetalRenderConfig;
 import com.pebbles_boon.metalrender.nativebridge.MetalHardwareChecker;
+import com.pebbles_boon.metalrender.performance.MetalRenderProfiler;
 import com.pebbles_boon.metalrender.render.MetalWorldRenderer;
 import com.pebbles_boon.metalrender.util.MetalLogger;
 import net.minecraft.client.Minecraft;
@@ -12,7 +15,6 @@ import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.minecraft.network.chat.Component;
 
 public final class MetalRenderCommands {
-
     private static LiteralArgumentBuilder<FabricClientCommandSource> literal(String name) {
         return LiteralArgumentBuilder.literal(name);
     }
@@ -20,102 +22,90 @@ public final class MetalRenderCommands {
     public static void register() {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(
-                    literal("metalrender")
-
-                            .then(literal("help").executes(ctx -> {
-                                sendHelp(ctx.getSource());
-                                return 1;
-                            }))
-
-                            .then(literal("status").executes(ctx -> {
-                                sendStatus(ctx.getSource());
-                                return 1;
-                            }))
-
-                            .then(literal("mark").then(com.mojang.brigadier.builder.RequiredArgumentBuilder
-                                    .<FabricClientCommandSource, String>argument("name", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                    .executes(ctx -> {
-                                        String name = com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "name");
-                                        com.pebbles_boon.metalrender.performance.MetalRenderProfiler.getInstance().setScene(name);
-                                        msg(ctx.getSource(), "scene = " + name);
-                                        return 1;
-                                    })))
-
-                            .then(literal("cache")
-                                    .then(literal("clear").executes(ctx -> {
-                                        cacheClear(ctx.getSource());
-                                        return 1;
-                                    })))
-
-                            .then(literal("reload").executes(ctx -> {
-                                reloadWorld(ctx.getSource());
-                                return 1;
-                            }))
-
-                            .then(literal("restart").executes(ctx -> {
-                                restart(ctx.getSource());
-                                return 1;
-                            }))
-
-                            .then(literal("adaptive")
-                                    .then(literal("on").executes(ctx -> {
-                                        MetalRenderConfig.setAdaptiveResolutionEnabled(true);
-                                        msg(ctx.getSource(),
-                                                "§aAdaptive resolution enabled (auto-scales wendew res to keep GPU time in budget)");
-                                        return 1;
-                                    }))
-                                    .then(literal("off").executes(ctx -> {
-                                        MetalRenderConfig.setAdaptiveResolutionEnabled(false);
-                                        MetalRenderConfig.setResolutionScale(1.0f);
-                                        msg(ctx.getSource(), "§cAdaptive resolution disabled, scale reset to 1.0x");
-                                        return 1;
-                                    })))
-
-                            .then(literal("config")
-                                    .then(literal("open").executes(ctx -> {
-                                        openConfigScreen(ctx.getSource());
-                                        return 1;
-                                    }))
-                                    .then(literal("save").executes(ctx -> {
-                                        MetalRenderConfig cfg = MetalRenderClient.getConfig();
-                                        if (cfg != null)
-                                            cfg.save();
-                                        msg(ctx.getSource(), "§aConfig saved to diks");
-                                        return 1;
-                                    }))
-                                    .then(literal("reload").executes(ctx -> {
-
-                                        msg(ctx.getSource(),
-                                                "§eConfig weloaded. some changes would need westart");
-                                        return 1;
-                                    }))
-                                    .then(literal("reset").executes(ctx -> {
-                                        resetConfig(ctx.getSource());
-                                        return 1;
-                                    })))
-
-                            .then(literal("performance")
-                                    .then(literal("reset").executes(ctx -> {
-                                        MetalRenderConfig.setResolutionScale(1.0f);
-                                        msg(ctx.getSource(),
-                                                "§epewfowmance settings reset");
-                                        return 1;
-                                    })))
-
-                            .then(literal("profile").executes(ctx -> {
-                                com.pebbles_boon.metalrender.performance.MetalRenderProfiler.getInstance()
-                                        .toggleVisible();
-                                boolean nowVisible = com.pebbles_boon.metalrender.performance.MetalRenderProfiler
-                                        .getInstance().isVisible();
-                                msg(ctx.getSource(), nowVisible ? "§aMetalRender profiler starts"
-                                        : "§eMetalRender profiler unstarts");
-                                return 1;
-                            }))
-
+                literal("metalrender")
+                    .then(literal("help").executes(ctx -> {
+                        sendHelp(ctx.getSource());
+                        return 1;
+                    }))
+                    .then(literal("status").executes(ctx -> {
+                        sendStatus(ctx.getSource());
+                        return 1;
+                    }))
+                    .then(literal("mark").then(RequiredArgumentBuilder
+                            .<FabricClientCommandSource, String>argument("name", StringArgumentType.word())
                             .executes(ctx -> {
-                                sendHelp(ctx.getSource());
+                                String name = StringArgumentType.getString(ctx, "name");
+                                MetalRenderProfiler.getInstance().setScene(name);
+                                msg(ctx.getSource(), "scene = " + name);
                                 return 1;
-                            }));
+                            })))
+                    .then(literal("cache")
+                            .then(literal("clear").executes(ctx -> {
+                                cacheClear(ctx.getSource());
+                                return 1;
+                            })))
+                    .then(literal("reload").executes(ctx -> {
+                        reloadWorld(ctx.getSource());
+                        return 1;
+                    }))
+                    .then(literal("restart").executes(ctx -> {
+                        restart(ctx.getSource());
+                        return 1;
+                    }))
+                    .then(literal("adaptive")
+                            .then(literal("on").executes(ctx -> {
+                                MetalRenderConfig.setAdaptiveResolutionEnabled(true);
+                                msg(ctx.getSource(),
+                                        "§aAdaptive resolution enabled (auto-scales wendew res to keep GPU time in budget)");
+                                return 1;
+                            }))
+                            .then(literal("off").executes(ctx -> {
+                                MetalRenderConfig.setAdaptiveResolutionEnabled(false);
+                                MetalRenderConfig.setResolutionScale(1.0f);
+                                msg(ctx.getSource(), "§cAdaptive resolution disabled, scale reset to 1.0x");
+                                return 1;
+                            })))
+                    .then(literal("config")
+                            .then(literal("open").executes(ctx -> {
+                                openConfigScreen(ctx.getSource());
+                                return 1;
+                            }))
+                            .then(literal("save").executes(ctx -> {
+                                MetalRenderConfig cfg = MetalRenderClient.getConfig();
+                                if (cfg != null)
+                                    cfg.save();
+                                msg(ctx.getSource(), "§aConfig saved to diks");
+                                return 1;
+                            }))
+                            .then(literal("reload").executes(ctx -> {
+                                msg(ctx.getSource(),
+                                        "§eConfig weloaded. some changes would need westart");
+                                return 1;
+                            }))
+                            .then(literal("reset").executes(ctx -> {
+                                resetConfig(ctx.getSource());
+                                return 1;
+                            })))
+                    .then(literal("performance")
+                            .then(literal("reset").executes(ctx -> {
+                                MetalRenderConfig.setResolutionScale(1.0f);
+                                msg(ctx.getSource(),
+                                        "§epewfowmance settings reset");
+                                return 1;
+                            })))
+                    .then(literal("profile").executes(ctx -> {
+                        MetalRenderProfiler.getInstance()
+                                .toggleVisible();
+                        boolean nowVisible = MetalRenderProfiler
+                                .getInstance().isVisible();
+                        msg(ctx.getSource(), nowVisible ? "§aMetalRender profiler starts"
+                                : "§eMetalRender profiler unstarts");
+                        return 1;
+                    }))
+                    .executes(ctx -> {
+                        sendHelp(ctx.getSource());
+                        return 1;
+                    }));
         });
         MetalLogger.info("metalwender command");
     }

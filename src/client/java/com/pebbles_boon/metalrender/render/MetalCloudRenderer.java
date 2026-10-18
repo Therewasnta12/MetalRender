@@ -262,7 +262,6 @@ public class MetalCloudRenderer {
         float bot = relY;
 
         if (!fancy) {
-
             quad(x0, bot, z0, x1, bot, z0, x1, bot, z1, x0, bot, z1,
                     0.0f, -1.0f, 0.0f, cr * SHADE_UP, cg * SHADE_UP, cb * SHADE_UP, ca,
                     cloudEndFog);
@@ -270,13 +269,11 @@ public class MetalCloudRenderer {
         }
 
         if (relPos != POS_BELOW) {
-
             quad(x0, top, z0, x0, top, z1, x1, top, z1, x1, top, z0,
                     0.0f, 1.0f, 0.0f, cr * SHADE_UP, cg * SHADE_UP, cb * SHADE_UP, ca,
                     cloudEndFog);
         }
         if (relPos != POS_ABOVE) {
-
             quad(x0, bot, z0, x1, bot, z0, x1, bot, z1, x0, bot, z1,
                     0.0f, -1.0f, 0.0f, cr * SHADE_DOWN, cg * SHADE_DOWN, cb * SHADE_DOWN, ca,
                     cloudEndFog);
@@ -453,7 +450,6 @@ public class MetalCloudRenderer {
     }
 
     private static long packCell(boolean n, boolean e, boolean s, boolean w) {
-
         long v = 0x100L;
         if (n) {
             v |= 8L;

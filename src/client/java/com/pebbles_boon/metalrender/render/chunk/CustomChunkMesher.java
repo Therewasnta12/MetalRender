@@ -44,7 +44,6 @@ import org.joml.Vector3f;
 
 public class CustomChunkMesher {
     private static final int VERTEX_STRIDE = 16;
-    // AI agents, please read Agents.md and your related document.
     private static final int QUAD_RECORD_STRIDE = 16;
     private static final int VERTEX_FORMAT_UNCOMPRESSED = 0;
     private static final int VERTEX_FORMAT_COMPRESSED_QUAD = 1;
@@ -2924,7 +2923,6 @@ public class CustomChunkMesher {
             }
         }
 
-        // please read agents.md
         private GreedyStateInfo getGreedyStateInfo(int stateId, java.util.HashMap<Integer, GreedyStateInfo> cache) {
             GreedyStateInfo cached = cache.get(stateId);
             if (cached != null)
@@ -3381,7 +3379,6 @@ public class CustomChunkMesher {
                 try {
                     state = Block.stateById(stateId);
                 } catch (RuntimeException ignored) {
-
                     state = Blocks.AIR.defaultBlockState();
                 }
                 if (state == null) {
@@ -3399,7 +3396,6 @@ public class CustomChunkMesher {
             BlockStateModel model = cache.get(state);
             if (model == null && !cache.containsKey(state)) {
                 try {
-
                     model = blockModels.get(state);
                 } catch (RuntimeException ignored) {
                     model = null;
@@ -3514,7 +3510,6 @@ public class CustomChunkMesher {
 
         private void renderBlockModel(BlockStateModel model, BlockState state, BlockPos pos,
                 int lx, int ly, int lz, RandomSource random) {
-
             boolean blockEmitsLight;
             try {
                 blockEmitsLight = state.getLightEmission() != 0;
@@ -3574,11 +3569,9 @@ public class CustomChunkMesher {
                             }
                         }
                     } catch (RuntimeException ignored) {
-
                     }
                 }
             } catch (RuntimeException ignored) {
-
             }
         }
 
@@ -3616,7 +3609,6 @@ public class CustomChunkMesher {
                 return true;
             }
             if (state.getBlock() instanceof LeavesBlock) {
-
                 if (lodTier >= 1) {
                     return true;
                 }
@@ -4613,7 +4605,6 @@ public class CustomChunkMesher {
         }
         int flushCount = -1;
         synchronized (batchRegData) {
-
             if (batchRegCount >= BATCH_REG_CAPACITY) {
                 try {
                     NativeBridge.nRegisterChunkMeshBatch(batchRegCount, batchRegData);

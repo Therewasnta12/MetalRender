@@ -13,11 +13,18 @@ import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.renderer.blockentity.BlockEntityRenderDispatcher;
+import net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -25,11 +32,20 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(LevelRenderer.class)
 public class EntityRenderMixin {
+    @Shadow
+    private BlockEntityRenderDispatcher blockEntityRenderDispatcher;
+
+    @Shadow
+    private ClientLevel level;
+
     @Unique
     private static final double metalrender$hardCullDistSq = 128.0 * 128.0;
 
     @Unique
     private int metalrender$entityCaptureCount = 0;
+
+    @Unique
+    private int metalrender$blockEntityFrames = 0;
 
     @Unique
     private int metalrender$entityCullCount = 0;
@@ -101,10 +117,52 @@ public class EntityRenderMixin {
                         metalrender$entityCullCount);
             }
         } catch (Throwable e) {
-
             if (metalrender$entityCaptureCount < 10) {
                 MetalLogger.error("[entitymix] cap fail: %s", e.getMessage());
             }
+        }
+    }
+
+    @Inject(method = "extractVisibleBlockEntities", at = @At("TAIL"), require = 0)
+    private void metalrender$extractBlockEntities(Camera camera, float tickDelta,
+            LevelRenderState levelRenderState, CallbackInfo ci) {
+        if (!MetalRenderClient.isEnabled()) {
+            return;
+        }
+        MetalWorldRenderer worldRenderer = MetalRenderClient.getWorldRenderer();
+        if (worldRenderer == null || level == null ||
+                !(worldRenderer.captureActive() || MetalRenderClient.isBackendMode())) {
+            return;
+        }
+        metalrender$blockEntityFrames++;
+        Vec3 cameraPos = camera.position();
+        int chunkX = ((int) Math.floor(cameraPos.x)) >> 4;
+        int chunkZ = ((int) Math.floor(cameraPos.z)) >> 4;
+        int radius = 6;
+        for (int cx = chunkX - radius; cx <= chunkX + radius; cx++) {
+            for (int cz = chunkZ - radius; cz <= chunkZ + radius; cz++) {
+                LevelChunk chunk = level.getChunkSource().getChunk(cx, cz, ChunkStatus.FULL, false);
+                if (chunk == null) {
+                    continue;
+                }
+                for (BlockEntity blockEntity : chunk.getBlockEntities().values()) {
+                    if (blockEntity.isRemoved() ||
+                            level.getGloballyRenderedBlockEntities().contains(blockEntity)) {
+                        continue;
+                    }
+                    if (blockEntity.getBlockPos().distToCenterSqr(cameraPos) > metalrender$hardCullDistSq) {
+                        continue;
+                    }
+                    BlockEntityRenderState state = blockEntityRenderDispatcher.tryExtractRenderState(
+                            blockEntity, tickDelta, null);
+                    if (state != null) {
+                        levelRenderState.blockEntityRenderStates.add(state);
+                    }
+                }
+            }
+        }
+        if (metalrender$blockEntityFrames % 300 == 1) {
+            MetalLogger.info("[blockentity] collected=%d", levelRenderState.blockEntityRenderStates.size());
         }
     }
 
