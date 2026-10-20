@@ -19,10 +19,13 @@ If you experience and bugs or issues please report them in the Issues tab or joi
 | シュクリム      | Necessary for survival         | Find it yourself and have a good time                                                     |
 | Java JVM 25   | Necessary                      | [Oracle](https://www.oracle.com/au/java/technologies/downloads/#java25) Or just any other provider|
 | ModMenu       | Necessary for versions V2+ | [Modrinth](https://modrinth.com/mod/modmenu)                            |
+| macOS 27        | REQUIRED | System Settings                       |
 
 ## Supported Devices
 
-- MacBook air M1 2020 or later
+Please Note, All of these devices have to be on AT LEAST macOS 27
+
+- MacBook Air M1 2020 or later
 - MacBook Pro M1 2020 or Later
 - Mac Studio March 2022 or Later
 - Mac Pro June 2023 or later(Discontinued production)
@@ -47,6 +50,7 @@ If you experience and bugs or issues please report them in the Issues tab or joi
 - MetalFX(Upscaling)
 - Fast terrain generation support
 - Liquid glass settings :o
+- Temporal AA 
 - Memory optimization and other culling features
 - Fully client side
 - Fully in your control with no automation
@@ -65,10 +69,15 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 - Will still load on other GPUs but won't offer any additional benefits or changes
 - Shaders are not yet supported. they will not be supported in the future, MetalShader is under work tho
 - This is incompatible with other rendering mod for obvious reasons(very obvious I believe), compatibility is planned for future updates
+- Please use macOS 27 when using V2+ metalrender uses Metal 4.1
 
 ---
 
 # FAQs
+
+- What macOS do I have to be on?
+
+ If you are using V1 then use macOS 26 and up, if you are using V2 and up then use macOS 27.
 
 - Why is this version diffrent from the Modrinth version?
 
@@ -76,7 +85,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
   every stable release and major bug clearance (a group of bugs that I fixed) or a new feature etc etc. I cannot flood the Modrinth page with 20 new releases every 5
   days or so.
 
-- When will Forge/NeoForge be added?
+- When will other mod loaders(e.g. Forge, NeoForge, etc) be added?
 
   I probably won't make support for other loaders in the future but for now, only Fabric is supported because its the most lightweight and popular.
 
@@ -89,11 +98,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
   There is a Suggestion tag on the Issues tab now! Please share your suggestions for MetalRender, I'm open to all suggestions and thanks for your help making
   MetalRender better for everyone! You may also send suggestions in the Discord server!
 
-- Will other mod loaders be supported in the near future?
-
-  I probably won't make support for other loaders in the future but for now, only Fabric is supported because its the most lightweight and popular.
-
-- It crashes, but I dont have any conflicting mods in the pack!!!
+- It crashes, but I dont have any conflicting mods in the pack!
 
  Reach out in the Discord server or Issues tab, we are glad to help you!
 
