@@ -77,7 +77,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 
 - What macOS do I have to be on?
 
- If you are using V1 then use macOS 26 and up, if you are using V2 and up then use macOS 27.
+  If you are using V1 then use macOS 26 and up, if you are using V2 and up then use macOS 27.
 
 - Why is this version diffrent from the Modrinth version?
 
@@ -100,7 +100,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 
 - It crashes, but I dont have any conflicting mods in the pack!
 
- Reach out in the Discord server or Issues tab, we are glad to help you!
+  Reach out in the Discord server or Issues tab, we are glad to help you!
 
 ## Incompatiblilties
 
