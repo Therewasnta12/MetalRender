@@ -1,6 +1,6 @@
  # MetalRender
 
-**MetalRender** is a custom rendering backend for Minecraft by pebbles_boon.  
+**MetalRender** is a custom rendering backend for Minecraft by pebbles_boon (with contributors).  
 It uses **Apple Metal** to provide a custom rendering backend on Mac(with many other features ofc).
 MetalRender is inspired by Nvidium (the amazing mod for Nvidia GPUs that makes your game speedy) by Cortex.
 
@@ -69,7 +69,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 - Will still load on other GPUs but won't offer any additional benefits or changes
 - Shaders are not yet supported. they will not be supported in the future, MetalShader is under work tho
 - This is incompatible with other rendering mod for obvious reasons(very obvious I believe), compatibility is planned for future updates
-- Please use macOS 27 when using V2+ metalrender uses Metal 4.1
+- Please use 27 when using V2+ metalrender uses Metal 4.1
 
 ---
 
@@ -424,3 +424,19 @@ cd metalrender
 ./gradlew clean build
 ./gradlew runclient
 ```
+# Test Results 
+
+M2 Air 2022 16Gbs of ram, Minecraft 26.2, only Fabric and an Elytra HUD mod(with MetalRender ofc), 2GB GPU ram permited and 2GB minecraft RAM, MESH ENABLED(rest is defult):
+Seed:5180085092509090221
+
+2Chunks and 5 Simulation: Low ~250 FPS, High ~650 FPS, Average ~400-450 FPS 
+
+5Chunks and 5 Simulation:Low ~130FPS, High ~400FPS, Average: ~130-150FPS 
+
+10 Chunks and Simulation: Low: ~110, High: ~250/360(Spike)FPS, Average: ~150-180
+
+20 Chunks and 20 Simulation: Low~108 FPS, High ~130FPS(can spike to ~200FPS), Average ~110-120FPS 
+
+32Chunks and simulation: Low ~68FPS, High ~153 FPS, Average ~120FPS 
+
+(Test may vary since this one was conducted in a Ice Spike and Plains biome)
