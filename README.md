@@ -418,6 +418,10 @@ cd metalrender
 # Test Results 
 
 M2 Air 2022 16Gbs of ram, Minecraft 26.2, only Fabric and an Elytra HUD mod(with MetalRender ofc), 2GB GPU ram permited and 2GB minecraft RAM, MESH ENABLED(rest is defult):
+
+adding M3 test result for v2.0.1 26.2:
+- 349 FPS median for 32 RD vs 96 on Vanilla, 118 on Sodium
+- 99th percentile frame time on 32 RD is 17.97ms
 Seed:5180085092509090221
 
 2Chunks and 5 Simulation: Low ~250 FPS, High ~650 FPS, Average ~400-450 FPS 
