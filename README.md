@@ -1,10 +1,10 @@
  # MetalRender
 
 **MetalRender** is a custom rendering backend for Minecraft by pebbles_boon.  
-It uses **Apple Metal** to provide a custom rendering backend on Mac.
+It uses **Apple Metal** to provide a custom rendering backend on Mac(with many other features ofc).
 MetalRender is inspired by Nvidium (the amazing mod for Nvidia GPUs that makes your game speedy) by Cortex.
 
-If you experience and bugs or issues please report them in the Issues tab or join the Discord server that is provided within Modrinth
+If you experience and bugs or issues please report them in the Issues tab or join the Discord server that is provided within Modrinth or via this link: https://discord.com/invite/7EFQBn6r94
 
 **DISCLAIMER:** MetalRender is not affiliated with, endorsed by, or associated with Apple Inc. "Metal" refers to the Apple Metal graphics API, used under standard developer terms. The MetalRender logo is an original design inspired by Metal and is not intended to resemble or imply association with any Apple Inc. branding.
 ---
@@ -13,12 +13,12 @@ If you experience and bugs or issues please report them in the Issues tab or joi
 
 | Dependency    | Necessity                      | Where to get                                                            |
 | ------------- | ------------------------------ | ----------------------------------------------------------------------- |
-| Sodium        | DO NOT INSTALL|                        |
+| Sodium        | DO NOT INSTALL PLEASE|                        |
 | Fabric        | Necessary                      | [Fabric's official page](https://fabricmc.net/use/installer/)           |
 | Fabric API    | Necessary                      | [Modrinth](https://modrinth.com/mod/fabric-api)                         |
-| シュクリム      | Necessary for survival         | Find it yourself                                                        |
+| シュクリム      | Necessary for survival         | Find it yourself and have a good time                                                     |
 | Java JVM 25   | Necessary                      | [Oracle](https://www.oracle.com/au/java/technologies/downloads/#java25) Or just any other provider|
-| ModMenu       | Necessary for versions v0.1.6+ | [Modrinth](https://modrinth.com/mod/modmenu)                            |
+| ModMenu       | Necessary for versions V2+ | [Modrinth](https://modrinth.com/mod/modmenu)                            |
 
 ## Supported Devices
 
@@ -42,7 +42,15 @@ If you experience and bugs or issues please report them in the Issues tab or joi
 - Uses **Metal** for rendering on macOS
 - Works with **Fabric API and Loader**
 - Checks your hardware before starting
-- Turns off nicely if Windows or Linux 
+- Turns off nicely if Windows or Linux
+- LODs support
+- MetalFX(Upscaling)
+- Fast terrain generation support
+- Liquid glass settings :o
+- Memory optimization and other culling features
+- Fully client side
+- Fully in your control with no automation
+- AI slop free :> (all human contributed)
 
 ---
 ### LLMs
@@ -68,18 +76,26 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
   every stable release and major bug clearance (a group of bugs that I fixed) or a new feature etc etc. I cannot flood the Modrinth page with 20 new releases every 5
   days or so.
 
-- When will Forge/Neoforge be added?
+- When will Forge/NeoForge be added?
 
   I probably won't make support for other loaders in the future but for now, only Fabric is supported because its the most lightweight and popular.
 
-- Can I run MetalRender on non-Apple Silicon hardware or firmware?
+- Can I run MetalRender on non-Apple Silicon hardware or firmware that has no Metal 4 support?
  
    no. what did you think this is a metal mod.
 
 - Where can I put suggestions?
 
   There is a Suggestion tag on the Issues tab now! Please share your suggestions for MetalRender, I'm open to all suggestions and thanks for your help making
-  MetalRender better for everyone!
+  MetalRender better for everyone! You may also send suggestions in the Discord server!
+
+- Will other mod loaders be supported in the near future?
+
+  I probably won't make support for other loaders in the future but for now, only Fabric is supported because its the most lightweight and popular.
+
+- It crashes, but I dont have any conflicting mods in the pack!!!
+
+ Reach out in the Discord server or Issues tab, we are glad to help you!
 
 ## Incompatiblilties
 
@@ -91,16 +107,24 @@ The following mods are known not to work with MetalRender:
 - Sulkan (DO NOT USE IT)
 - Distant Horizons, Voxy, or any other LOD mods
 - Any World Based rendering mod
+- Minecraft 1.21.11
 
 ---
 
+# Customizations
+
+You can configure the settings via the /metalrender command (guide coming right up) or you can go into video settings and configure it form there
+
+NOTE: If You Are Using V2, You Will NOT See A Done Button Like In V1, Just Press Ecs To Return To The Previous Page
+
+---
 # MetalRender Commands
 
 MetalRender commands allow you to configure MetalRender settings, check status and much more, all without opening the Config menu (available in v0.1.6 with ModMenu!).
 
 ## start here
 
-All commands start with `/metalrender` (or `/mr` for short if configured).
+All commands start with `/metalrender`.
 
 ```
 /metalrender help
@@ -173,7 +197,7 @@ Fully restarts the MetalRender system by disabling and re-enabling it.
 
 ---
 
-### LOD (Level of Detail) Commands
+### LOD (Level of Detail) Commands (LODS ARE STILL IN BETA, MIGHT SEE SOME VISUAL ISSUES)
 
 #### `/metalrender lod reset`
 
@@ -362,7 +386,7 @@ Try:
 2. `/metalrender reload`
 3. `/metalrender restart`
 4. Contact Apple support
-5. If Mac/Macbook is flaming, contact your Certified Apple Repair store, but you should call emergency services first.
+5. If Mac/Macbook is flaming, contact your Certified Apple Repair store, but you should call emergency services first tho.
 
 ---
 
