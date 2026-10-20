@@ -31,14 +31,6 @@ Please Note, All of these devices have to be on AT LEAST macOS 27
 - Mac Pro June 2023 or later(Discontinued production)
 - Mac Mini 2020 or later
 - MacBook Neo 2026 or later
-- iPad Pro 2021 or later(M)
-- iPad 10th generation A14 or later
-- iPad Air 2022 or later(M) or A14 Bionic(2020) or later
-- iPad Mini 6th Gen or later
-- iPhone 16e (A18) or later 
-- iPhone Air(1st Gen) or Later
-- iPhone SE3
-- All iPhone 12 Models or later
 
 ## Features
 
@@ -49,8 +41,7 @@ Please Note, All of these devices have to be on AT LEAST macOS 27
 - LODs support
 - MetalFX(Upscaling)
 - Fast terrain generation support
-- Liquid glass settings :o
-- Temporal AA 
+- Liquid glass settings :o 
 - Memory optimization and other culling features
 - Fully client side
 - Fully in your control with no automation
@@ -77,7 +68,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 
 - What macOS do I have to be on?
 
-  If you are using V1 then use macOS 26 and up, if you are using V2 and up then use macOS 27.
+  If you are using 0.1.X then use macOS 26 and up, if you are using V2 and up then use macOS 27.
 
 - Why is this version diffrent from the Modrinth version?
 
@@ -120,7 +111,7 @@ The following mods are known not to work with MetalRender:
 
 You can configure the settings via the /metalrender command (guide coming right up) or you can go into video settings and configure it form there
 
-NOTE: If You Are Using V2, You Will NOT See A Done Button Like In V1, Just Press Ecs To Return To The Previous Page
+NOTE: If You Are Using V2, You Will NOT See A Done Button Like In 0.1.X, Just Press Ecs To Return To The Previous Page
 
 ---
 # MetalRender Commands
@@ -202,7 +193,7 @@ Fully restarts the MetalRender system by disabling and re-enabling it.
 
 ---
 
-### LOD (Level of Detail) Commands (LODS ARE STILL IN BETA, MIGHT SEE SOME VISUAL ISSUES)
+### LOD (Level of Detail) Commands (MIGHT SEE SOME VISUAL ISSUES)
 
 #### `/metalrender lod reset`
 
