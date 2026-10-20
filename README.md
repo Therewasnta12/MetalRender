@@ -4,7 +4,7 @@
 It uses **Apple Metal** to provide a custom rendering backend on Mac.
 MetalRender is inspired by Nvidium (the amazing mod for Nvidia GPUs that makes your game speedy) by Cortex.
 
-If you experience and bugs or issues please report them in the Issues tab or join the Discord server that is provided in Modrinth
+If you experience and bugs or issues please report them in the Issues tab or join the Discord server that is provided within Modrinth
 
 **DISCLAIMER:** MetalRender is not affiliated with, endorsed by, or associated with Apple Inc. "Metal" refers to the Apple Metal graphics API, used under standard developer terms. The MetalRender logo is an original design inspired by Metal and is not intended to resemble or imply association with any Apple Inc. branding.
 ---
@@ -56,7 +56,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 - Only works on Metal (macOS)
 - Will still load on other GPUs but won't offer any additional benefits or changes
 - Shaders are not yet supported. they will not be supported in the future, MetalShader is under work tho
-- This is uncompatable with other rendering mod for obvious reasons, compatabilty is planned for future updates
+- This is incompatible with other rendering mod for obvious reasons, compatibility is planned for future updates
 
 ---
 
@@ -86,7 +86,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 The following mods are known not to work with MetalRender:
 - Sodium (ALL VERSIONS)
 - VulkanMod (ALL VERSIONS)
-- C2ME (Dont use, will not provide benifits)
+- C2ME (Don't use, will not provide benefits)
 - Iris (Not supported)
 - Sulkan (DO NOT USE IT)
 - Distant Horizons, Voxy, or any other LOD mods
@@ -96,7 +96,7 @@ The following mods are known not to work with MetalRender:
 
 # MetalRender Commands
 
-MetalRender commands allow you to configure MetalRender settings, check status and much more, all without opening the Config menu (avaliable in v0.1.6 with ModMenu!).
+MetalRender commands allow you to configure MetalRender settings, check status and much more, all without opening the Config menu (available in v0.1.6 with ModMenu!).
 
 ## start here
 
@@ -369,7 +369,7 @@ Try:
 ## Technical Notes
 
 - All commands work in **any gamemode** (Survival, Creative, Adventure, Spectator)
-- Commands are **client-side only** and don't require server permissions (unless you installed some weird plugin that doesn't allow you to run commands???)
+- Commands are **client-side only** and don't require server permissions (unless you installed some weird plugin that doesn't allow you to run commands?)
 - Settings are persisted to `config/metalrender.json`
 - Cache clearing restarts the renderer but doesn't disconnect you from the world
 
