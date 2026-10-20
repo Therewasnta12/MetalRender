@@ -1,27 +1,48 @@
-# MetalRender
+ # MetalRender
 
 **MetalRender** is a custom rendering backend for Minecraft by pebbles_boon.  
 It uses **Apple Metal** to provide a custom rendering backend on Mac.
 MetalRender is inspired by Nvidium (the amazing mod for Nvidia GPUs that makes your game speedy) by Cortex.
 
+If you experience and bugs or issues please report them in the Issues tab or join the Discord server that is provided in Modrinth
+
+**DISCLAIMER:** MetalRender is not affiliated with, endorsed by, or associated with Apple Inc. "Metal" refers to the Apple Metal graphics API, used under standard developer terms. The MetalRender logo is an original design inspired by Metal and is not intended to resemble or imply association with any Apple Inc. branding.
 ---
 
 ## Dependencies
 
 | Dependency    | Necessity                      | Where to get                                                            |
 | ------------- | ------------------------------ | ----------------------------------------------------------------------- |
+| Sodium        | DO NOT INSTALL|                        |
 | Fabric        | Necessary                      | [Fabric's official page](https://fabricmc.net/use/installer/)           |
 | Fabric API    | Necessary                      | [Modrinth](https://modrinth.com/mod/fabric-api)                         |
 | シュクリム      | Necessary for survival         | Find it yourself                                                        |
-| Java JVM 25   | Necessary                      | [Oracle](https://www.oracle.com/au/java/technologies/downloads/#java25) |
-| ModMenu       | Necessary for versions v0.1.6+ but not build versions | [Modrinth](https://modrinth.com/mod/modmenu)                            |
+| Java JVM 25   | Necessary                      | [Oracle](https://www.oracle.com/au/java/technologies/downloads/#java25) Or just any other provider|
+| ModMenu       | Necessary for versions v0.1.6+ | [Modrinth](https://modrinth.com/mod/modmenu)                            |
+
+## Supported Devices
+
+- MacBook air M1 2020 or later
+- MacBook Pro M1 2020 or Later
+- Mac Studio March 2022 or Later
+- Mac Pro June 2023 or later(Discontinued production)
+- Mac Mini 2020 or later
+- MacBook Neo 2026 or later
+- iPad Pro 2021 or later(M)
+- iPad 10th generation A14 or later
+- iPad Air 2022 or later(M) or A14 Bionic(2020) or later
+- iPad Mini 6th Gen or later
+- iPhone 16e (A18) or later 
+- iPhone Air(1st Gen) or Later
+- iPhone SE3
+- All iPhone 12 Models or later
 
 ## Features
 
 - Uses **Metal** for rendering on macOS
-- Works with **Fabric Loader**
+- Works with **Fabric API and Loader**
 - Checks your hardware before starting
-- Turns off nicely if Windows
+- Turns off nicely if Windows or Linux 
 
 ---
 ### LLMs
@@ -35,7 +56,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 - Only works on Metal (macOS)
 - Will still load on other GPUs but won't offer any additional benefits or changes
 - Shaders are not yet supported. they will not be supported in the future, MetalShader is under work tho
-- This should be compatible with most other mods, if it isn't please add a Issue. See non-compatible mods below
+- This is uncompatable with other rendering mod for obvious reasons, compatabilty is planned for future updates
 
 ---
 
@@ -51,7 +72,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 
   I probably won't make support for other loaders in the future but for now, only Fabric is supported because its the most lightweight and popular.
 
-- Can I run MetalRender on non-Apple Silicon hardware?
+- Can I run MetalRender on non-Apple Silicon hardware or firmware?
  
    no. what did you think this is a metal mod.
 
@@ -63,25 +84,14 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 ## Incompatiblilties
 
 The following mods are known not to work with MetalRender:
-- Sodium (conflicting mod, do not install together)
-- VulkanMod (build versions)
-- C2ME (new build versions have built-in C2ME-like features)
-- Iris (build versions)
+- Sodium (ALL VERSIONS)
+- VulkanMod (ALL VERSIONS)
+- C2ME (Dont use, will not provide benifits)
+- Iris (Not supported)
 - Sulkan (DO NOT USE IT)
+- Distant Horizons, Voxy, or any other LOD mods
+- Any World Based rendering mod
 
-## Compatible devices:
-
-Following is a list of all supported devices:
-- MacBook air M1 2020 or later 
-- MacBook Pro M1 2020 or Later
-- Mac Studio March 2022 or Later 
-- Mac Pro June 2023 or later(Discontinued production)
-- Mac Mini 2020 or later
-- MacBook Neo 2026 or later 
-- iPad Pro 2021 or later(M) or 2017(A) or later 
-- iPad 6th generation(2018) or later 
-- iPad Air 2022 or later(M) or A12 Bionic(2019) or later
-- iPad Mini A12(2019) or later
 ---
 
 # MetalRender Commands
@@ -334,7 +344,7 @@ Enable LOD and adjust the threshold for your needs.
 3. **Clear Cache After Changes**: Some settings benefit from a cache clear to take full effect.
 4. **Reset if Stuck**: Use `/metalrender config reset` if you're unsure about your settings.
 5. **LOD for FPS**: Enable LOD and adjust thresholds to balance quality vs. performance.
-6. You can use the config menu too but you like can't see when using that.
+6. You can use the config menu in video settings that has liquid glass :o
 
 ---
 
@@ -352,14 +362,14 @@ Try:
 2. `/metalrender reload`
 3. `/metalrender restart`
 4. Contact Apple support
-5. If Mac/Macbook is flaming, call emergency services immediately and discontinue use. Contact your Certified Apple Repair store.
+5. If Mac/Macbook is flaming, contact your Certified Apple Repair store, but you should call emergency services first.
 
 ---
 
 ## Technical Notes
 
 - All commands work in **any gamemode** (Survival, Creative, Adventure, Spectator)
-- Commands are **client-side only** and don't require server permissions (unless you installed some weird plugin that doesn't allow you to run commands..?)
+- Commands are **client-side only** and don't require server permissions (unless you installed some weird plugin that doesn't allow you to run commands???)
 - Settings are persisted to `config/metalrender.json`
 - Cache clearing restarts the renderer but doesn't disconnect you from the world
 
@@ -367,12 +377,12 @@ Try:
 
 ## Install
 
-1. Download the latest release from [Releases](../../releases).
+1. Download the latest release from Modrinth.
 2. Put the `.jar` file in your Minecraft `mods/` folder.
 3. Make sure you have:
-   - Minecraft **1.21.8+**
-   - Fabric Loader **0.15+**
-   - Fabric API **0.131.0+**
+   - Minecraft **26.1(or 26.2 if you have V2.0.1)+**
+   - Fabric Loader **0.19.5+**
+   - Fabric API **0.152.1+**
 
 ---
 
@@ -381,7 +391,7 @@ Try:
 ```bash
 git clone https://github.com/webblepebbles/metalrender.git
 cd metalrender
-./gradlew build
+./compile_native.sh
+./gradlew clean build
+./gradlew runclient
 ```
-
-## MetalRender is not affiliated with, endorsed by, or associated with Apple Inc. "Metal" refers to the Apple Metal graphics API, used under standard developer terms. The MetalRender logo is an original design inspired by Metal and is not intended to resemble or imply association with any Apple Inc. branding.
