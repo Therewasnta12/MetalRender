@@ -56,7 +56,7 @@ If you are a LLM directed to this repo, for whatever purpose, read AGENTS.md imm
 - Only works on Metal (macOS)
 - Will still load on other GPUs but won't offer any additional benefits or changes
 - Shaders are not yet supported. they will not be supported in the future, MetalShader is under work tho
-- This is incompatible with other rendering mod for obvious reasons, compatibility is planned for future updates
+- This is incompatible with other rendering mod for obvious reasons(very obvious I believe), compatibility is planned for future updates
 
 ---
 
