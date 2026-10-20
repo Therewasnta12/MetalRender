@@ -1,5 +1,7 @@
  # MetalRender
 
+ # THIS IS 26.3, THIS IS NOT YET COMPLETED, DO NOT TRY TO USE IT
+
 **MetalRender** is a custom rendering backend for Minecraft by pebbles_boon (with contributors).  
 It uses **Apple Metal** to provide a custom rendering backend on Mac(with many other features ofc).
 MetalRender is inspired by Nvidium (the amazing mod for Nvidia GPUs that makes your game speedy) by Cortex.
