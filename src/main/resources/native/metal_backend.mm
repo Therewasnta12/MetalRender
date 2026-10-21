@@ -103,6 +103,7 @@ static uint8_t mr_pass_label_id(const std::string &label) {
 }
 
 struct MRFrameAcc {
+  double gpuMs = 0.0;
   double ms[MR_PASS_CATEGORIES] = {0, 0, 0, 0, 0};
   int encoders = 0;
 };
@@ -119,6 +120,8 @@ struct MRContext {
   uint64_t frameSerials[2] = {0, 0};
   bool frameWaitPending = false;
   bool timestampsEnabled = false;
+  uint32_t profileFrame = 0;
+  uint32_t profileInterval = 16;
   id<MTLCounterSampleBuffer> sampleBuffers[MR_SAMPLE_SLOTS] = {nil, nil, nil};
   int sampleSlot = 0;
   int sampleCursor = 0;
@@ -179,6 +182,7 @@ static id<MTLCommandBuffer> mr_cmd(MRContext *ctx) {
 }
 
 void mr_arena_hiz_build(id<MTLCommandBuffer> cmd, id<MTLTexture> depth);
+bool mr_arena_hiz_enabled();
 
 static void mr_end_encoders(MRContext *ctx) {
   if (ctx->render) {
@@ -228,6 +232,9 @@ static void mr_setup_timestamps(MRContext *ctx) {
   const char *flag = getenv("METALRENDER_GPUTIMES");
   if (flag && flag[0] == '0')
     return;
+  const char *interval = getenv("METALRENDER_GPU_SAMPLE_INTERVAL");
+  if (interval)
+    ctx->profileInterval = (uint32_t)std::max(1, std::min(1024, atoi(interval)));
   if (![ctx->device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
     return;
   id<MTLCounterSet> tsSet = nil;
@@ -278,7 +285,8 @@ static int mr_pass_category(const std::string &label) {
 }
 
 static void mr_attach_samples(MRContext *ctx, MTLRenderPassDescriptor *rp, const std::string &label) {
-  if (!ctx->timestampsEnabled || ctx->sampleCursor + 2 > MR_SAMPLES_PER_SLOT)
+  if (!ctx->timestampsEnabled || ctx->profileFrame % ctx->profileInterval != 0 ||
+      ctx->sampleCursor + 2 > MR_SAMPLES_PER_SLOT)
     return;
   int index = ctx->sampleCursor;
   rp.sampleBufferAttachments[0].sampleBuffer = ctx->sampleBuffers[ctx->sampleSlot];
@@ -323,22 +331,21 @@ static void mr_collect_samples(MRContext *ctx, MRSampleRange range, id<MTLCounte
   }
 }
 
-static void mr_publish_frame(MRContext *ctx, int encoders) {
+static void mr_publish_frame(MRContext *ctx, int encoders, bool sampled) {
   MRFrameAcc acc;
   {
     std::lock_guard<std::mutex> lock(ctx->accMutex);
     acc = ctx->frameAcc;
     ctx->frameAcc = MRFrameAcc();
   }
-  float total = 0.0f;
-  for (int i = 0; i < MR_PASS_CATEGORIES; i++) {
-    g_backendPassMs[i].store((float)acc.ms[i]);
-    total += (float)acc.ms[i];
-  }
-  g_backendGpuMs.store(total);
+  g_backendGpuMs.store((float)acc.gpuMs);
   g_backendEncoders.store(encoders);
-  std::lock_guard<std::mutex> ll(g_passLabelMutex);
-  g_passReportFrames++;
+  if (sampled) {
+    for (int i = 0; i < MR_PASS_CATEGORIES; i++)
+      g_backendPassMs[i].store((float)acc.ms[i]);
+    std::lock_guard<std::mutex> ll(g_passLabelMutex);
+    g_passReportFrames++;
+  }
 }
 
 extern "C" JNIEXPORT jstring JNICALL MR_JNI(nPassReport)(JNIEnv *env, jclass) {
@@ -471,6 +478,7 @@ extern "C" JNIEXPORT jintArray JNICALL MR_JNI(nUniformBlockSizes)(JNIEnv *env, j
   sizes[MR_BLOCK_ROTSCALE_CONFIG] = sizeof(MRRotScaleConfig);
   sizes[MR_BLOCK_SPIDER_CONFIG] = sizeof(MRSpiderConfig);
   sizes[MR_BLOCK_CLOUD_INFO] = sizeof(MRCloudInfo);
+  sizes[MR_BLOCK_TERRAIN_UNIFORM] = sizeof(MRTerrainUniform);
   jintArray out = env->NewIntArray(MR_BLOCK_COUNT);
   env->SetIntArrayRegion(out, 0, MR_BLOCK_COUNT, sizes);
   return out;
@@ -1281,15 +1289,21 @@ extern "C" JNIEXPORT jlong JNICALL MR_JNI(nCtxSubmit)(JNIEnv *, jclass, jlong ha
     uint64_t submitNs = mr_now_ns();
     bool presented = frameEnd && ctx->lastPresentNs >= submitNs - 50000000ull;
     bool isFrameEnd = frameEnd;
-    [cmd addCompletedHandler:^(id<MTLCommandBuffer>) {
+    bool sampledFrame = ctx->timestampsEnabled && ctx->profileFrame % ctx->profileInterval == 0;
+    if (frameEnd)
+      ctx->profileFrame++;
+    [cmd addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+      if (completed.GPUEndTime > completed.GPUStartTime) {
+        std::lock_guard<std::mutex> lock(ctx->accMutex);
+        ctx->frameAcc.gpuMs += (completed.GPUEndTime - completed.GPUStartTime) * 1000.0;
+      }
       if (sampleBuffer) {
         mr_collect_samples(ctx, range, sampleBuffer, cpuBase, gpuBase);
         [sampleBuffer release];
       }
       if (isFrameEnd) {
         g_backendCompletedFrame.store(endedFrame, std::memory_order_release);
-        if (ctx->timestampsEnabled)
-          mr_publish_frame(ctx, encoders);
+        mr_publish_frame(ctx, encoders, sampledFrame);
         if (presented) {
           uint64_t latency = mr_now_ns() - submitNs;
           uint64_t old = g_gpuLatencyNs.load();
@@ -1304,8 +1318,7 @@ extern "C" JNIEXPORT jlong JNICALL MR_JNI(nCtxSubmit)(JNIEnv *, jclass, jlong ha
       ctx->frameSerials[0] = ctx->frameSerials[1];
       ctx->frameSerials[1] = serial;
       ctx->frameWaitPending = true;
-      if (!ctx->timestampsEnabled)
-        g_backendEncoders.store(encoders);
+      g_backendEncoders.store(encoders);
     }
     return (jlong)serial;
   }
@@ -1366,8 +1379,17 @@ extern "C" JNIEXPORT jlong JNICALL MR_JNI(nQueryValue)(JNIEnv *, jclass, jlong q
   return (jlong)(e > s ? e - s : 0);
 }
 
-extern "C" JNIEXPORT jlong JNICALL MR_JNI(nCtxRenderEncoder)(JNIEnv *, jclass, jlong handle) {
+extern "C" JNIEXPORT jlong JNICALL MR_JNI(nCtxRenderEncoder)(JNIEnv *, jclass, jlong handle, jboolean terrain) {
   MRContext *ctx = (MRContext *)(uintptr_t)handle;
+  if (terrain && ctx->render && ctx->renderDepth) {
+    ctx->terrainPass = true;
+    ctx->render.label = @"metalrender world";
+    if (ctx->cmdHasSamples && ctx->sampleCursor >= 2) {
+      int index = ctx->sampleCursor / 2 - 1;
+      ctx->sampleCats[index] = 0;
+      ctx->sampleLabels[index] = mr_pass_label_id("metalrender world");
+    }
+  }
   return (jlong)(uintptr_t)ctx->render;
 }
 

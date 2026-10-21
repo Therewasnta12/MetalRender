@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "metalrender",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "license": "Pebbles_boon Software Licence",
   "authors": [
     "pebbles_boon"
@@ -22,11 +22,11 @@
     "metalrender.mixins.json"
   ],
   "depends": {
-    "fabricloader": ">=0.19.5",
-    "minecraft": ">=26.2",
+    "fabricloader": "*",
+    "minecraft": ">=26.3",
     "fabric-api": "*"
   },
-  "conflicts": {
+  "breaks": {
     "sodium": "*"
   }
 }

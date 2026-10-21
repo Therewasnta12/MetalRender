@@ -1,11 +1,11 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.textures.AddressMode;
-import com.mojang.blaze3d.textures.FilterMode;
-import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.AddressMode;
+import com.mojang.renderpearl.api.textures.FilterMode;
+import com.mojang.renderpearl.api.textures.GpuSampler;
 import java.util.OptionalDouble;
 
-public final class MetalSampler extends GpuSampler {
+public final class MetalSampler implements GpuSampler {
     private final AddressMode addressModeU;
     private final AddressMode addressModeV;
     private final FilterMode minFilter;
@@ -30,7 +30,8 @@ public final class MetalSampler extends GpuSampler {
         return handle;
     }
 
-    boolean isClosed() {
+    @Override
+    public boolean isClosed() {
         return closed;
     }
 

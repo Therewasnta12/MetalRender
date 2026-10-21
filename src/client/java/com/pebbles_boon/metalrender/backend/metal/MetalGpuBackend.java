@@ -1,15 +1,14 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.GLFWErrorCapture;
-import com.mojang.blaze3d.shaders.GpuDebugOptions;
-import com.mojang.blaze3d.shaders.ShaderSource;
-import com.mojang.blaze3d.systems.BackendCreationException;
-import com.mojang.blaze3d.systems.GpuBackend;
-import com.mojang.blaze3d.systems.GpuDevice;
+import com.mojang.renderpearl.api.device.BackendCreationException;
+import com.mojang.renderpearl.api.device.GpuBackend;
+import com.mojang.renderpearl.api.device.GpuDebugOptions;
+import com.mojang.renderpearl.api.device.GpuDevice;
+import com.mojang.renderpearl.frontend.FrontendGpuDevice;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.config.MetalRenderConfig;
 import com.pebbles_boon.metalrender.util.MetalLogger;
-import org.lwjgl.glfw.GLFW;
+import org.lwjgl.sdl.SDLVideo;
 
 public final class MetalGpuBackend implements GpuBackend {
     @Override
@@ -18,28 +17,32 @@ public final class MetalGpuBackend implements GpuBackend {
     }
 
     @Override
-    public void setWindowHints() {
-        GLFW.glfwWindowHint(GLFW.GLFW_CLIENT_API, GLFW.GLFW_NO_API);
-    }
-
-    @Override
-    public void handleWindowCreationErrors(GLFWErrorCapture.Error error) throws BackendCreationException {
-        if (error != null) {
-            throw new BackendCreationException(error.toString(), BackendCreationException.Reason.GLFW_ERROR);
+    public void loadLibrary() throws BackendCreationException {
+        try {
+            MetalNative.ensureLoaded();
+        } catch (Throwable t) {
+            throw new BackendCreationException("MetalRender native library unavailable: " + t.getMessage(),
+                    BackendCreationException.Reason.OTHER);
         }
-        throw new BackendCreationException("Failed to create window for Metal",
-                BackendCreationException.Reason.GLFW_ERROR);
     }
 
     @Override
-    public GpuDevice createDevice(long window, ShaderSource shaderSource, GpuDebugOptions debugOptions,
-            Runnable onDeviceClosed) throws BackendCreationException {
+    public void unloadLibrary() {
+    }
+
+    @Override
+    public long createWindow(String title, int width, int height, long flags) {
+        return SDLVideo.SDL_CreateWindow(title, width, height, flags);
+    }
+
+    @Override
+    public GpuDevice createDevice(GpuDebugOptions debugOptions) throws BackendCreationException {
         try {
             if (MetalRenderConfig.getBool("metalrender.backend.failInit", false)) {
                 throw new BackendCreationException("Metal backend disabled by metalrender.backend.failInit",
                         BackendCreationException.Reason.OTHER);
             }
-            GpuDevice device = new GpuDevice(new MetalDeviceBackend(window, shaderSource), onDeviceClosed);
+            GpuDevice device = new FrontendGpuDevice(new MetalDeviceBackend());
             MetalRenderClient.setBackendMode(true);
             MetalLogger.info("backend ready: Metal (MetalRender)");
             return device;

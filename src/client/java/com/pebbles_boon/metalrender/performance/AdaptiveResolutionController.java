@@ -21,7 +21,7 @@ public final class AdaptiveResolutionController {
     private int sampleCount;
     private long lastCheckMs;
     private long lastChangeMs;
-    private volatile double frameBudgetMs = 16.666;
+    private volatile double frameBudgetMs = 1.666;
 
     private AdaptiveResolutionController() {
     }

@@ -1,9 +1,9 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.systems.CommandEncoderBackend;
-import com.mojang.blaze3d.systems.GpuSurface;
-import com.mojang.blaze3d.systems.GpuSurfaceBackend;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend;
+import com.mojang.renderpearl.api.device.GpuSurface;
+import com.mojang.renderpearl.backend.api.GpuSurfaceBackend;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import java.util.Collection;
 import java.util.List;
 

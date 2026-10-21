@@ -60,6 +60,11 @@ public class MetalVertexConsumer implements VertexConsumer {
     }
 
     @Override
+    public VertexConsumer setUv3(float u, float v) {
+        return this;
+    }
+
+    @Override
     public VertexConsumer setUv1(int u, int v) {
         this.overlayU = u;
         this.overlayV = v;

@@ -1,6 +1,6 @@
 package com.pebbles_boon.metalrender.sodium.mixins;
 
-import com.mojang.blaze3d.systems.GpuBackend;
+import com.mojang.renderpearl.api.device.GpuBackend;
 import com.pebbles_boon.metalrender.backend.metal.MetalGpuBackend;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
@@ -11,7 +11,7 @@ import net.minecraft.client.PreferredGraphicsApi;
 @Mixin(Minecraft.class)
 public class BackendInstallMixin {
     @Redirect(method = "<init>", at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/client/PreferredGraphicsApi;getBackendsToTry()[Lcom/mojang/blaze3d/systems/GpuBackend;"))
+            target = "Lnet/minecraft/client/PreferredGraphicsApi;getBackendsToTry()[Lcom/mojang/renderpearl/api/device/GpuBackend;"))
     private GpuBackend[] metalrender$installMetalBackend(PreferredGraphicsApi api) {
         GpuBackend[] original = api.getBackendsToTry();
         if ("gl".equals(System.getProperty("metalrender.backend", "metal"))) {

@@ -204,6 +204,7 @@ public final class QuadTiers {
         final int[] n = new int[4];
         int minX, maxX, minY, maxY, minZ, maxZ;
         int uMin, uMax, vMin, vMax;
+        boolean tiled;
 
         void load(ByteBuffer src, int base) {
             for (int i = 0; i < 4; i++) {
@@ -496,6 +497,8 @@ public final class QuadTiers {
         int e2x = (q.px[3] - q.px[0]) >> 1;
         int e2y = (q.py[3] - q.py[0]) >> 1;
         int e2z = (q.pz[3] - q.pz[0]) >> 1;
+        q.tiled = Math.abs(e1x) + Math.abs(e1y) + Math.abs(e1z) > 192
+                || Math.abs(e2x) + Math.abs(e2y) + Math.abs(e2z) > 192;
         int[] edges = { e1x, e1y, e1z, e2x, e2y, e2z };
         for (int e : edges) {
             if (e < -4096 || e > 4095) {
@@ -715,6 +718,7 @@ public final class QuadTiers {
                 ByteBuffer.allocateDirect(1 << 14).order(ByteOrder.nativeOrder()),
                 ByteBuffer.allocateDirect(1 << 15).order(ByteOrder.nativeOrder()) };
         int[] qTier = new int[1024];
+        int[] qTiled = new int[1024];
         int[] qSeq = new int[1024];
         int[] qBucket = new int[1024];
         int[] qLayer = new int[1024];
@@ -739,6 +743,7 @@ public final class QuadTiers {
             if (qTier.length < capacityQuads) {
                 int cap = Math.max(capacityQuads, qTier.length * 2);
                 qTier = new int[cap];
+                qTiled = new int[cap];
                 qSeq = new int[cap];
                 qBucket = new int[cap];
                 qLayer = new int[cap];
@@ -828,6 +833,7 @@ public final class QuadTiers {
                 inBucket++;
             }
             q.load(qsrc, qbase);
+            q.tiled = false;
             if (translucent && q.a[0] == WATER_ALPHA && q.a[1] == WATER_ALPHA && q.a[2] == WATER_ALPHA
                     && q.a[3] == WATER_ALPHA) {
                 Arrays.fill(q.a, 0xFE);
@@ -870,6 +876,8 @@ public final class QuadTiers {
                 c++;
             }
             s.qTier[i] = tier;
+            int tiledFlag = tier == TIER_B && q.tiled ? 1 : 0;
+            s.qTiled[i] = tiledFlag;
             s.qBucket[i] = bucket;
             int layer = 1;
             if (translucent) {
@@ -907,7 +915,7 @@ public final class QuadTiers {
             int cx = Math.max(0, Math.min(15, Math.floorDiv(q.minX, 256)));
             int cy = Math.max(0, Math.min(15, Math.floorDiv(q.minY, 256)));
             int cz = Math.max(0, Math.min(15, Math.floorDiv(q.minZ, 256)));
-            s.keys[i] = ((long) bucket << 40) | ((long) layer << 38) | ((long) tier << 36) | ((long) morton(cx >> 1, cy >> 1, cz >> 1) << 24)
+            s.keys[i] = ((long) bucket << 40) | ((long) layer << 38) | ((long) tier << 36) | ((long) tiledFlag << 35) | ((long) morton(cx >> 1, cy >> 1, cz >> 1) << 24)
                     | i;
             s.boxes[i] = packQuadBox(q);
         }
@@ -936,6 +944,7 @@ public final class QuadTiers {
             int unitBucket = s.qBucket[idx0];
             int unitTier = s.qTier[idx0];
             int unitLayer = s.qLayer[idx0];
+            int unitTiled = s.qTiled[idx0];
             int count = 0;
             int j = i;
             int stride = unitTier == TIER_A ? TIER_A_BYTES : unitTier == TIER_B ? TIER_B_BYTES : TIER_C_BYTES;
@@ -950,7 +959,8 @@ public final class QuadTiers {
             localFirst[unitTier] = out[unitTier].position() / 16;
             while (j < quadTotal && count < MAX_UNIT_QUADS) {
                 int idx = (int) (s.keys[j] & 0xFFFFFF);
-                if (s.qBucket[idx] != unitBucket || s.qTier[idx] != unitTier || s.qLayer[idx] != unitLayer) {
+                if (s.qBucket[idx] != unitBucket || s.qTier[idx] != unitTier || s.qLayer[idx] != unitLayer
+                        || s.qTiled[idx] != unitTiled) {
                     break;
                 }
                 int nb = s.boxes[idx];
@@ -991,7 +1001,7 @@ public final class QuadTiers {
                 count++;
                 j++;
             }
-            int meta = (count - 1) | (unitBucket << 5) | (unitTier << 8) | (unitLayer << 10);
+            int meta = (count - 1) | (unitBucket << 5) | (unitTier << 8) | (unitLayer << 10) | (unitTiled << 12);
             int box = bx0 | (by0 << 5) | (bz0 << 10) | (bx1 << 15) | (by1 << 20) | (bz1 << 25);
             s.units = ensure(s.units, UNIT_BYTES);
             s.units.putInt(localFirst[unitTier] | (unitTier << 30));

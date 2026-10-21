@@ -748,6 +748,7 @@ static inline float4 mr_sample_terrain(texture2d<float> tex, sampler s, float2 u
 vertex VOut terrain_vertex(VIn in [[stage_in]],
                            constant MRProjection &proj [[buffer(MR_SLOT_PROJECTION)]],
                            constant MRChunkSection &section [[buffer(MR_SLOT_CHUNK_SECTION), function_constant(TERRAIN_SECTION)]],
+                           constant MRTerrainUniform &terrain [[buffer(MR_SLOT_TERRAIN_UNIFORM), function_constant(TERRAIN_SECTION)]],
                            constant MRGlobals &globals [[buffer(MR_SLOT_GLOBALS), function_constant(TERRAIN_SECTION)]],
                            constant MRDynamicTransforms &dt [[buffer(MR_SLOT_DYNAMIC_TRANSFORMS), function_constant(TERRAIN_DT)]],
                            texture2d<float> lightmap [[texture(2), function_constant(TERRAIN_VS_LIGHTMAP)]],
@@ -759,7 +760,7 @@ vertex VOut terrain_vertex(VIn in [[stage_in]],
     int3 chunk = int3(section.ChunkPosition[0], section.ChunkPosition[1], section.ChunkPosition[2]);
     int3 camera = int3(globals.CameraBlockPos[0], globals.CameraBlockPos[1], globals.CameraBlockPos[2]);
     p = p + float3(chunk - camera) + mr_vec3(globals.CameraOffset);
-    modelView = mr_mat4(section.ModelViewMat);
+    modelView = mr_mat4(terrain.ModelViewMat);
   } else {
     if (VS_VARIANT == MR_VS_BLOCK) {
       p = p + mr_vec3(dt.ModelOffset);
@@ -782,12 +783,13 @@ vertex VOut terrain_vertex(VIn in [[stage_in]],
 fragment float4 terrain_fragment(VOut in [[stage_in]],
                                  constant MRFog &fog [[buffer(MR_SLOT_FOG)]],
                                  constant MRChunkSection &section [[buffer(MR_SLOT_CHUNK_SECTION), function_constant(TERRAIN_SECTION)]],
+                                 constant MRTerrainUniform &terrain [[buffer(MR_SLOT_TERRAIN_UNIFORM), function_constant(TERRAIN_SECTION)]],
                                  constant MRGlobals &globals [[buffer(MR_SLOT_GLOBALS), function_constant(TERRAIN_SECTION)]],
                                  constant MRDynamicTransforms &dt [[buffer(MR_SLOT_DYNAMIC_TRANSFORMS), function_constant(TERRAIN_DT)]],
                                  texture2d<float> tex0 [[texture(0)]], sampler s0 [[sampler(0)]]) {
   float4 color;
   if (TERRAIN_SECTION) {
-    float2 pixelSize = 1.0 / float2(section.TextureSize[0], section.TextureSize[1]);
+    float2 pixelSize = 1.0 / float2(terrain.TextureSize[0], terrain.TextureSize[1]);
     color = mr_sample_terrain(tex0, s0, in.uv0, pixelSize, globals.UseRgss == 1) * in.color;
     color = mix(mr_vec4(fog.FogColor) * float4(1.0, 1.0, 1.0, color.a), color, section.ChunkVisibility);
   } else if (FS_VARIANT == MR_FS_CRUMBLING) {

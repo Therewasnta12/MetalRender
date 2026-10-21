@@ -1,6 +1,6 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.buffers.GpuFence;
+import com.mojang.renderpearl.api.commands.GpuFence;
 
 public final class MetalFence implements GpuFence {
     private final MetalCommandEncoderBackend encoder;

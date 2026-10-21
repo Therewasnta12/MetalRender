@@ -1,26 +1,24 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
 import com.mojang.blaze3d.platform.NativeImage;
-import com.mojang.blaze3d.shaders.ShaderSource;
-import com.mojang.blaze3d.systems.BackendCreationException;
-import com.mojang.blaze3d.systems.CommandEncoderBackend;
-import com.mojang.blaze3d.systems.DeviceFeatures;
-import com.mojang.blaze3d.systems.DeviceInfo;
-import com.mojang.blaze3d.systems.DeviceLimits;
-import com.mojang.blaze3d.systems.DeviceType;
-import com.mojang.blaze3d.systems.GpuQueryPool;
-import com.mojang.blaze3d.systems.GpuSurfaceBackend;
-import com.mojang.blaze3d.systems.HintsAndWorkarounds;
-import com.mojang.blaze3d.systems.GpuDeviceBackend;
-import com.mojang.blaze3d.textures.AddressMode;
-import com.mojang.blaze3d.textures.FilterMode;
-import com.mojang.blaze3d.textures.GpuSampler;
-import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.device.BackendCreationException;
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend;
+import com.mojang.renderpearl.api.device.DeviceFeatures;
+import com.mojang.renderpearl.api.device.DeviceInfo;
+import com.mojang.renderpearl.api.device.DeviceLimits;
+import com.mojang.renderpearl.api.device.DeviceType;
+import com.mojang.renderpearl.api.commands.GpuQueryPool;
+import com.mojang.renderpearl.backend.api.GpuSurfaceBackend;
+import com.mojang.renderpearl.api.device.HintsAndWorkarounds;
+import com.mojang.renderpearl.backend.api.GpuDeviceBackend;
+import com.mojang.renderpearl.api.textures.AddressMode;
+import com.mojang.renderpearl.api.textures.FilterMode;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.pebbles_boon.metalrender.util.MetalLogger;
 import java.io.IOException;
 import java.io.InputStream;
@@ -44,18 +42,16 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     private final long library;
     private final long ctx;
     private final String deviceName;
-    private final long window;
     private MetalSurface surface;
     private final MetalCommandEncoderBackend encoder;
     private final MetalBindings bindings;
     private final Map<SamplerKey, Long> samplerStates = new HashMap<>();
     private final Map<Integer, Long> depthStates = new HashMap<>();
-    private final Map<RenderPipeline, MetalCompiledPipeline> pipelines = new HashMap<>();
+    private final List<MetalCompiledPipeline> pipelines = new java.util.ArrayList<>();
     private boolean closed;
     private static String libraryError;
 
-    MetalDeviceBackend(long window, ShaderSource shaderSource) throws BackendCreationException {
-        this.window = window;
+    MetalDeviceBackend() throws BackendCreationException {
         try {
             MetalNative.ensureLoaded();
         } catch (Throwable t) {
@@ -150,18 +146,10 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
         return cached;
     }
 
-    MetalCompiledPipeline compiledPipeline(RenderPipeline pipeline) {
-        if (pipeline == null) {
-            return null;
-        }
-        FamilyTable.logCoverage();
-        return pipelines.computeIfAbsent(pipeline, p -> new MetalCompiledPipeline(this, p));
-    }
-
     @Override
-    public GpuSurfaceBackend createSurface(long windowHandle) {
+    public GpuSurfaceBackend createSurface(long windowHandle, java.util.function.BooleanSupplier unused) {
         if (surface == null) {
-            surface = new MetalSurface(windowHandle != 0 ? windowHandle : window, true);
+            surface = new MetalSurface(windowHandle, true);
         }
         return new MetalSurfaceBackend(this, surface);
     }
@@ -169,6 +157,23 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     @Override
     public CommandEncoderBackend createCommandEncoder() {
         return encoder;
+    }
+
+    @Override
+    public BackendRenderPipeline.Pending compilePipeline(BackendRenderPipeline.CreateInfo info) {
+        FamilyTable.logCoverage();
+        return () -> {
+            MetalCompiledPipeline pipeline = new MetalCompiledPipeline(this, info, FamilyTable.findOrSynthesize(info));
+            pipelines.add(pipeline);
+            return pipeline;
+        };
+    }
+
+    void clearPipelineCache() {
+        for (MetalCompiledPipeline pipeline : pipelines) {
+            pipeline.release();
+        }
+        pipelines.clear();
     }
 
     @Override
@@ -196,21 +201,9 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     }
 
     @Override
-    public GpuTexture createTexture(Supplier<String> label, int usage, GpuFormat format, int width,
-            int height, int depthOrLayers, int mipLevels) {
-        return createTexture(label != null ? label.get() : null, usage, format, width, height, depthOrLayers,
-                mipLevels);
-    }
-
-    @Override
     public GpuTexture createTexture(String label, int usage, GpuFormat format, int width, int height,
             int depthOrLayers, int mipLevels) {
         return new MetalTexture(this, usage, label, format, width, height, depthOrLayers, mipLevels);
-    }
-
-    @Override
-    public GpuTextureView createTextureView(GpuTexture texture) {
-        return createTextureView(texture, 0, texture.getMipLevels());
     }
 
     @Override
@@ -241,34 +234,21 @@ public final class MetalDeviceBackend implements GpuDeviceBackend {
     }
 
     @Override
-    public CompiledRenderPipeline precompilePipeline(RenderPipeline pipeline, ShaderSource shaderSource) {
-        return compiledPipeline(pipeline);
-    }
-
-    @Override
-    public void clearPipelineCache() {
-        for (MetalCompiledPipeline pipeline : pipelines.values()) {
-            pipeline.release();
-        }
-        pipelines.clear();
-    }
-
-    @Override
     public GpuQueryPool createTimestampQueryPool(int size) {
         return new MetalQueryPool(size);
     }
 
     @Override
-    public long getTimestampNow() {
-        return System.nanoTime();
+    public long getTimestampCalibrationOffset() {
+        return 0L;
     }
 
     @Override
     public DeviceInfo getDeviceInfo() {
         return new DeviceInfo(deviceName, "Apple", "Metal 3", true, "Metal", 1.0f,
-                new DeviceLimits(16, 256, 16384, Integer.MAX_VALUE, 0, 1),
-                new DeviceFeatures(false, false, false, false, false, false, true), Set.of(),
-                new HintsAndWorkarounds(false, false), DeviceType.INTEGRATED);
+                new DeviceLimits(16, 256, 16384, Long.MAX_VALUE, 0, 1, 0),
+                new DeviceFeatures(true, false, false, false, false, false, false, false), Set.of(),
+                new HintsAndWorkarounds(false, false, false, false), DeviceType.INTEGRATED);
     }
 
     @Override

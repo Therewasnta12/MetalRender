@@ -294,25 +294,67 @@ struct TerrainFrame {
     float4 camFrac;
 };
 
+struct TerrainFogRecon {
+    float4 row0;
+    float4 row1;
+    float4 row2;
+    float4 proj;
+    float4 proj2;
+    float4 viewport;
+};
+
+inline float2 terrain_fog_dist(float4 pos, constant TerrainFogRecon& r) {
+    float w = 1.0f / pos.w;
+    float ndcx = 2.0f * pos.x / r.viewport.x - 1.0f;
+    float ndcy = 1.0f - 2.0f * pos.y / r.viewport.y;
+    float vz = w / r.proj2.x;
+    float vx = (ndcx * w - r.proj.z * vz) / r.proj.x;
+    float vy = (ndcy * w - r.proj.w * vz) / r.proj.y;
+    float3 v = float3(vx, vy, vz);
+    float3 world = float3(dot(r.row0.xyz, v) + r.row0.w, dot(r.row1.xyz, v) + r.row1.w,
+                          dot(r.row2.xyz, v) + r.row2.w);
+    return float2(length(world), max(length(world.xz), abs(world.y)));
+}
+
 struct TerrainVOut {
+    float4 position [[position]];
+    half4  color;
+    half2  lightUV;
+    float2 tile;
+    uint   quadAddr [[flat]];
+};
+
+struct TerrainVOutSlim {
     float4 position [[position]];
     float2 texCoord;
     half4  color;
     half2  lightUV;
-    float2 fogSphCyl;
-    float2 tile;
-    float4 tileRect [[flat]];
 };
 
-inline half4 sample_terrain_atlas(texture2d<half> atlas, sampler smp, TerrainVOut in) {
-    float2 gx = dfdx(in.texCoord);
-    float2 gy = dfdy(in.texCoord);
-    float2 uv = in.texCoord;
-    if (in.tileRect.z != 0.0f || in.tileRect.w != 0.0f) {
-        uv = in.tileRect.xy + fract(in.tile * 0.99999f) * in.tileRect.zw;
-        gx = dfdx(in.tile) * in.tileRect.zw;
-        gy = dfdy(in.tile) * in.tileRect.zw;
-    }
+inline float4 terrain_tile_rect(device const uint* arena, device const uint2* sprites, uint addr) {
+    device const uint* w = arena + addr;
+    uint sprite = terr_bits(w, 114, 13);
+    uint fu0 = terr_bits(w, 131, 9);
+    uint fv0 = terr_bits(w, 140, 9);
+    uint fu1 = terr_bits(w, 149, 9);
+    uint fv1 = terr_bits(w, 158, 9);
+    uint2 sr = sprites[sprite];
+    float su0 = float(sr.x & 0xFFFFu);
+    float sv0 = float(sr.x >> 16);
+    float su1 = float(sr.y & 0xFFFFu);
+    float sv1 = float(sr.y >> 16);
+    return float4(su0 + (su1 - su0) * (float(fu0) / 256.0f),
+                  sv0 + (sv1 - sv0) * (float(fv0) / 256.0f),
+                  (su1 - su0) * (float(fu1 - fu0) / 256.0f),
+                  (sv1 - sv0) * (float(fv1 - fv0) / 256.0f)) / float4(65535.0f);
+}
+
+inline half4 sample_terrain_tiled(texture2d<half> atlas, sampler smp, TerrainVOut in,
+                                  device const uint* arena, device const uint2* sprites) {
+    float4 rect = terrain_tile_rect(arena, sprites, in.quadAddr);
+    float2 uv = rect.xy + fract(in.tile * 0.99999f) * rect.zw;
+    float2 gx = dfdx(in.tile) * rect.zw;
+    float2 gy = dfdy(in.tile) * rect.zw;
     return atlas.sample(smp, uv, gradient2d(gx, gy));
 }
 
@@ -330,12 +372,48 @@ vertex TerrainVOut terrain_vs(
 ) {
     TerrainVOut out;
     out.position = float4(0.0, 0.0, 2.0, 1.0);
+    out.color    = half4(0.0h);
+    out.lightUV  = half2(0.0h);
+    out.tile = float2(0.0f);
+    out.quadAddr = 0u;
+    uint quad = vid >> 2;
+    uint corner = vid & 3u;
+    uint2 entry = list[iid];
+    UnitRecord unit = units[entry.x];
+    if (quad > (unit.meta & 31u)) {
+        return out;
+    }
+    SectionRecord section = sections[entry.y];
+    uint tier = (unit.meta >> 8) & 3u;
+    TerrainCorner c = terr_decode(arena, sprites, tier, unit.firstQuad, quad, corner);
+    float3 rel = float3(float(section.x - frame.camBlock.x), float(section.y - frame.camBlock.y),
+                        float(section.z - frame.camBlock.z)) - frame.camFrac.xyz;
+    float3 worldPos = c.pos + rel;
+    out.position = projectionMatrix * (modelViewMatrix * float4(worldPos, 1.0));
+    out.tile     = c.tile;
+    out.quadAddr = (unit.firstQuad + quad * 2u) * 4u;
+    out.color    = half4(half3(c.rgb), half(c.alpha));
+    out.lightUV  = half2(kLightmapLut[c.light & 0xFFu]);
+    return out;
+}
+
+vertex TerrainVOutSlim terrain_vs_slim(
+    uint vid [[vertex_id]],
+    uint iid [[instance_id]],
+    device const uint2* list [[buffer(0)]],
+    constant float4x4& projectionMatrix [[buffer(1)]],
+    constant float4x4& modelViewMatrix [[buffer(2)]],
+    constant TerrainFrame& frame [[buffer(4)]],
+    device const uint* arena [[buffer(5)]],
+    device const UnitRecord* units [[buffer(6)]],
+    device const SectionRecord* sections [[buffer(7)]],
+    device const uint2* sprites [[buffer(8)]]
+) {
+    TerrainVOutSlim out;
+    out.position = float4(0.0, 0.0, 2.0, 1.0);
     out.texCoord = float2(0.0);
     out.color    = half4(0.0h);
     out.lightUV  = half2(0.0h);
-    out.fogSphCyl = float2(0.0f);
-    out.tile = float2(0.0f);
-    out.tileRect = float4(0.0f);
     uint quad = vid >> 2;
     uint corner = vid & 3u;
     uint2 entry = list[iid];
@@ -351,43 +429,29 @@ vertex TerrainVOut terrain_vs(
     float3 worldPos = c.pos + rel;
     out.position = projectionMatrix * (modelViewMatrix * float4(worldPos, 1.0));
     out.texCoord = c.uv;
-    out.tile     = c.tile;
-    out.tileRect = c.tileRect;
     out.color    = half4(half3(c.rgb), half(c.alpha));
     out.lightUV  = half2(kLightmapLut[c.light & 0xFFu]);
-    out.fogSphCyl = float2(length(worldPos), max(length(worldPos.xz), abs(worldPos.y)));
     return out;
 }
 
-fragment half4 fragment_arena_solid(
-    TerrainVOut in [[stage_in]],
-    texture2d<half> blockAtlas  [[texture(0)]],
-    texture2d<half> lightmap    [[texture(1)]],
-    constant FogUniforms& fog [[buffer(6)]]
-) {
-    constexpr sampler lightSampler(mag_filter::linear, min_filter::linear,
-                                   mip_filter::nearest, address::clamp_to_edge);
-    constexpr sampler atlasSampler(mag_filter::nearest, min_filter::linear,
-                                   mip_filter::linear);
-    half3 rgb = sample_terrain_atlas(blockAtlas, atlasSampler, in).rgb * in.color.rgb;
-    half3 light = lightmap.sample(lightSampler, float2(in.lightUV)).rgb;
+constant sampler kTerrLightSampler(mag_filter::linear, min_filter::linear, mip_filter::nearest,
+                                   address::clamp_to_edge);
+constant sampler kTerrAtlasSampler(mag_filter::nearest, min_filter::linear, mip_filter::linear);
+constant sampler kTerrAtlasSamplerAniso(mag_filter::nearest, min_filter::linear, mip_filter::linear,
+                                        max_anisotropy(8));
+
+inline half4 terrain_shade_solid(half4 tex, half4 color, half2 lightUV, float2 fogDist,
+                                 texture2d<half> lightmap, constant FogUniforms& fog) {
+    half3 rgb = tex.rgb * color.rgb;
+    half3 light = lightmap.sample(kTerrLightSampler, float2(lightUV)).rgb;
     rgb *= max(light, half3(0.04h));
-    rgb = vanilla_apply_fog(rgb, in.fogSphCyl, fog);
+    rgb = vanilla_apply_fog(rgb, fogDist, fog);
     return half4(rgb, half(1.0h));
 }
 
-fragment half4 fragment_arena_cutout(
-    TerrainVOut in [[stage_in]],
-    texture2d<half> blockAtlas  [[texture(0)]],
-    texture2d<half> lightmap    [[texture(1)]],
-    constant FogUniforms& fog [[buffer(6)]]
-) {
-    constexpr sampler lightSampler(mag_filter::linear, min_filter::linear,
-                                   mip_filter::nearest, address::clamp_to_edge);
-    constexpr sampler atlasSampler(mag_filter::nearest, min_filter::linear,
-                                   mip_filter::linear);
-    half4 texColor = sample_terrain_atlas(blockAtlas, atlasSampler, in);
-    half vertAlpha = in.color.a;
+inline half4 terrain_shade_cutout(half4 texColor, half4 color, half2 lightUV, float2 fogDist,
+                                  texture2d<half> lightmap, constant FogUniforms& fog) {
+    half vertAlpha = color.a;
     if (texColor.a < half(0.5h)) {
         if (vertAlpha > half(0.994h) && vertAlpha < half(0.998h)) {
             texColor.a = half(1.0h);
@@ -395,25 +459,16 @@ fragment half4 fragment_arena_cutout(
             discard_fragment();
         }
     }
-    half3 rgb = texColor.rgb * in.color.rgb;
-    half3 light = lightmap.sample(lightSampler, float2(in.lightUV)).rgb;
+    half3 rgb = texColor.rgb * color.rgb;
+    half3 light = lightmap.sample(kTerrLightSampler, float2(lightUV)).rgb;
     rgb *= max(light, half3(0.04h));
-    rgb = vanilla_apply_fog(rgb, in.fogSphCyl, fog);
+    rgb = vanilla_apply_fog(rgb, fogDist, fog);
     return half4(rgb, half(1.0h));
 }
 
-fragment half4 fragment_arena_water(
-    TerrainVOut in [[stage_in]],
-    texture2d<half> blockAtlas  [[texture(0)]],
-    texture2d<half> lightmap    [[texture(1)]],
-    constant FogUniforms& fog [[buffer(6)]]
-) {
-    constexpr sampler lightSampler(mag_filter::linear, min_filter::linear,
-                                   mip_filter::nearest, address::clamp_to_edge);
-    constexpr sampler atlasSampler(mag_filter::nearest, min_filter::linear,
-                                   mip_filter::linear, max_anisotropy(8));
-    half4 texColor = sample_terrain_atlas(blockAtlas, atlasSampler, in);
-    half vertAlpha = in.color.a;
+inline half4 terrain_shade_water(half4 texColor, half4 color, half2 lightUV, float2 fogDist,
+                                 texture2d<half> lightmap, constant FogUniforms& fog) {
+    half vertAlpha = color.a;
     bool flagged = vertAlpha > half(0.994h) && vertAlpha < half(0.998h);
     bool water = flagged || vertAlpha < half(0.99h);
     half alpha;
@@ -428,11 +483,83 @@ fragment half4 fragment_arena_water(
         }
         alpha = texColor.a;
     }
-    half3 rgb = texColor.rgb * in.color.rgb;
-    half3 light = lightmap.sample(lightSampler, float2(in.lightUV)).rgb;
+    half3 rgb = texColor.rgb * color.rgb;
+    half3 light = lightmap.sample(kTerrLightSampler, float2(lightUV)).rgb;
     rgb *= max(light, half3(0.04h));
-    rgb = vanilla_apply_fog(rgb, in.fogSphCyl, fog);
+    rgb = vanilla_apply_fog(rgb, fogDist, fog);
     return half4(rgb, alpha);
+}
+
+fragment half4 fragment_arena_solid(
+    TerrainVOut in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogUniforms& fog [[buffer(6)]],
+    constant TerrainFogRecon& recon [[buffer(7)]],
+    device const uint* arena [[buffer(5)]],
+    device const uint2* sprites [[buffer(8)]]
+) {
+    half4 tex = sample_terrain_tiled(blockAtlas, kTerrAtlasSampler, in, arena, sprites);
+    return terrain_shade_solid(tex, in.color, in.lightUV, terrain_fog_dist(in.position, recon), lightmap, fog);
+}
+
+fragment half4 fragment_arena_cutout(
+    TerrainVOut in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogUniforms& fog [[buffer(6)]],
+    constant TerrainFogRecon& recon [[buffer(7)]],
+    device const uint* arena [[buffer(5)]],
+    device const uint2* sprites [[buffer(8)]]
+) {
+    half4 tex = sample_terrain_tiled(blockAtlas, kTerrAtlasSampler, in, arena, sprites);
+    return terrain_shade_cutout(tex, in.color, in.lightUV, terrain_fog_dist(in.position, recon), lightmap, fog);
+}
+
+fragment half4 fragment_arena_water(
+    TerrainVOut in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogUniforms& fog [[buffer(6)]],
+    constant TerrainFogRecon& recon [[buffer(7)]],
+    device const uint* arena [[buffer(5)]],
+    device const uint2* sprites [[buffer(8)]]
+) {
+    half4 tex = sample_terrain_tiled(blockAtlas, kTerrAtlasSamplerAniso, in, arena, sprites);
+    return terrain_shade_water(tex, in.color, in.lightUV, terrain_fog_dist(in.position, recon), lightmap, fog);
+}
+
+fragment half4 fragment_arena_solid_slim(
+    TerrainVOutSlim in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogUniforms& fog [[buffer(6)]],
+    constant TerrainFogRecon& recon [[buffer(7)]]
+) {
+    half4 tex = blockAtlas.sample(kTerrAtlasSampler, in.texCoord);
+    return terrain_shade_solid(tex, in.color, in.lightUV, terrain_fog_dist(in.position, recon), lightmap, fog);
+}
+
+fragment half4 fragment_arena_cutout_slim(
+    TerrainVOutSlim in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogUniforms& fog [[buffer(6)]],
+    constant TerrainFogRecon& recon [[buffer(7)]]
+) {
+    half4 tex = blockAtlas.sample(kTerrAtlasSampler, in.texCoord);
+    return terrain_shade_cutout(tex, in.color, in.lightUV, terrain_fog_dist(in.position, recon), lightmap, fog);
+}
+
+fragment half4 fragment_arena_water_slim(
+    TerrainVOutSlim in [[stage_in]],
+    texture2d<half> blockAtlas  [[texture(0)]],
+    texture2d<half> lightmap    [[texture(1)]],
+    constant FogUniforms& fog [[buffer(6)]],
+    constant TerrainFogRecon& recon [[buffer(7)]]
+) {
+    half4 tex = blockAtlas.sample(kTerrAtlasSamplerAniso, in.texCoord);
+    return terrain_shade_water(tex, in.color, in.lightUV, terrain_fog_dist(in.position, recon), lightmap, fog);
 }
 
 struct TerrainFragArgs {

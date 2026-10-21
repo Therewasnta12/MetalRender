@@ -1,14 +1,15 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.IndexType;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.systems.RenderPass;
-import com.mojang.blaze3d.systems.GpuQueryPool;
-import com.mojang.blaze3d.systems.RenderPassBackend;
-import com.mojang.blaze3d.textures.GpuSampler;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.pipeline.IndexType;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
+import com.mojang.renderpearl.util.TextureViewAndSampler;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.commands.GpuQueryPool;
+import com.mojang.renderpearl.backend.api.RenderPassBackend;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -118,27 +119,30 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
     }
 
     @Override
-    public void setPipeline(RenderPipeline pipeline) {
-        this.pipeline = device.compiledPipeline(pipeline);
+    public void setPipeline(BackendRenderPipeline pipeline) {
+        this.pipeline = (MetalCompiledPipeline) pipeline;
     }
 
     @Override
-    public void bindTexture(String name, GpuTextureView view, GpuSampler sampler) {
-        if (view == null || sampler == null) {
+    public void setUniform(int index, Object value) {
+        if (pipeline == null || index < 0 || index >= pipeline.uniformNames().size()) {
+            return;
+        }
+        String name = pipeline.uniformNames().get(index);
+        if (value instanceof GpuBufferSlice slice) {
+            uniforms.put(name, slice);
             samplers.remove(name);
+        } else if (value instanceof TextureViewAndSampler binding) {
+            samplers.put(name, new Binding((MetalTextureView) binding.view(), (MetalSampler) binding.sampler()));
+            uniforms.remove(name);
         } else {
-            samplers.put(name, new Binding((MetalTextureView) view, (MetalSampler) sampler));
+            uniforms.remove(name);
+            samplers.remove(name);
         }
     }
 
     @Override
-    public void setUniform(String name, GpuBuffer buffer) {
-        uniforms.put(name, buffer.slice());
-    }
-
-    @Override
-    public void setUniform(String name, GpuBufferSlice slice) {
-        uniforms.put(name, slice);
+    public void pushConstants(java.nio.ByteBuffer data) {
     }
 
     @Override
@@ -212,22 +216,6 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
     }
 
     @Override
-    public <T> void drawMultipleIndexed(Collection<RenderPass.Draw<T>> draws, GpuBuffer fallbackIndexBuffer,
-            IndexType fallbackIndexType, Collection<String> dynamicUniforms, T argument) {
-        IndexType defaultType = fallbackIndexType != null ? fallbackIndexType
-                : IndexType.SHORT;
-        for (RenderPass.Draw<T> draw : draws) {
-            IndexType type = draw.indexType() != null ? draw.indexType() : defaultType;
-            setIndexBuffer(draw.indexBuffer() != null ? draw.indexBuffer() : fallbackIndexBuffer, type);
-            setVertexBuffer(draw.slot(), draw.vertexBuffer() != null ? draw.vertexBuffer().slice() : null);
-            if (draw.uniformUploaderConsumer() != null) {
-                draw.uniformUploaderConsumer().accept(argument, this::setUniform);
-            }
-            submitDraw(draw.baseVertex(), draw.firstIndex(), draw.indexCount(), type, 1);
-        }
-    }
-
-    @Override
     public void draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance) {
         submitDraw(firstVertex, 0, vertexCount, null, instanceCount);
     }
@@ -238,7 +226,6 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
         if (compiled == null || compiled.drawsNothing() || count <= 0) {
             return;
         }
-        RenderPipeline info = compiled.info();
         boolean hasFormat = compiled.hasVertexFormat();
         if (hasFormat && (vertexBuffer == null || vertexBuffer.isClosed())) {
             return;
@@ -365,12 +352,12 @@ public final class MetalRenderPassBackend implements RenderPassBackend {
                 : Short.toUnsignedInt(MemoryUtil.memGetShort(base + (long) i * 2));
     }
 
-    public long nativeRenderEncoder() {
+    public long nativeRenderEncoder(boolean terrain) {
         if (closed || !encoder.ensureRenderEncoder(this)) {
             return 0;
         }
         encoder.invalidateBindings();
-        return MetalNative.nCtxRenderEncoder(encoder.ctx());
+        return MetalNative.nCtxRenderEncoder(encoder.ctx(), terrain || "metalrender_terrain".equals(label));
     }
 
     public int targetWidth() {

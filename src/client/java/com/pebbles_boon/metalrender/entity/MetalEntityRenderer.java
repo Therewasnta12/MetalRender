@@ -1,6 +1,6 @@
 package com.pebbles_boon.metalrender.entity;
 
-import com.mojang.blaze3d.opengl.GlTexture;
+import com.mojang.renderpearl.backend.opengl.GlTexture;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.backend.MetalRenderer;
@@ -293,7 +293,7 @@ public class MetalEntityRenderer {
             mc.getModelManager().getBlockStateModelSet().get(breaking.blockState()).collectParts(
                     net.minecraft.util.RandomSource.create(breaking.blockState().getSeed(breaking.blockPos())),
                     breakingParts);
-            reusableCmdQueue.submitBreakingBlockModel(matrixStack, breakingParts, breaking.progress());
+            reusableCmdQueue.submitBreakingBlockModel(matrixStack, breakingParts, breaking.progress(), false);
             for (MetalRenderCommandQueue.DrawSegment segment : reusableCmdQueue.getSegments()) {
                 enqueueDraw(segment.startVertex, segment.vertexCount, 0,
                         segment.glTextureId, segment.renderFlags);
@@ -325,7 +325,7 @@ public class MetalEntityRenderer {
                 state.blockPos.getZ() - camZ);
         Camera camera = mc.gameRenderer.mainCamera();
         if (camera != null && camera.isInitialized()) {
-            camera.extractRenderState(reusableCameraRenderState, tickDelta);
+            camera.extractRenderState(reusableCameraRenderState, mc.getDeltaTracker());
         }
         mc.getBlockEntityRenderDispatcher().submit(state, matrixStack, reusableCmdQueue,
                 reusableCameraRenderState);
@@ -460,7 +460,7 @@ public class MetalEntityRenderer {
         Minecraft mc = Minecraft.getInstance();
         Camera camera = mc != null ? mc.gameRenderer.mainCamera() : null;
         if (camera != null && camera.isInitialized()) {
-            camera.extractRenderState(reusableCameraRenderState, tickDelta);
+            camera.extractRenderState(reusableCameraRenderState, mc.getDeltaTracker());
         } else {
             reusableCameraRenderState.pos = new Vec3(0.0, 0.0, 0.0);
             reusableCameraRenderState.blockPos = BlockPos.ZERO;
@@ -800,7 +800,7 @@ public class MetalEntityRenderer {
         int emission = 0;
         try {
             tintIndex = quad.materialInfo().tintIndex();
-            shade = quad.materialInfo().shade();
+            shade = true;
             emission = quad.materialInfo().lightEmission();
         } catch (Exception ignored) {
         }

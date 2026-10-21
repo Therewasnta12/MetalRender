@@ -1,7 +1,7 @@
 package com.pebbles_boon.metalrender.render;
 
-import com.mojang.blaze3d.systems.CommandEncoder;
-import com.mojang.blaze3d.systems.RenderPass;
+import com.mojang.renderpearl.api.commands.CommandEncoder;
+import com.mojang.renderpearl.api.commands.RenderPass;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.backend.MetalRenderer;
@@ -637,7 +637,7 @@ public class MetalWorldRenderer {
         if (mc.player != null) chunkMesher.updateBuildRange(mc.player.chunkPosition().x(), mc.player.chunkPosition().z(), mc.options.renderDistance().get());
         int w = mc.getWindow().getWidth();
         int h = mc.getWindow().getHeight();
-        int refreshRate = mc.getWindow().getRefreshRate();
+        int refreshRate = (int) Math.round(mc.getWindow().findBestMonitor().currentMode().getRefreshRate());
         double budgetMs = refreshRate > 0 ? 1000.0 / refreshRate : 16.666;
         if (!mc.options.enableVsync().get()) {
             int fpsLimit = mc.options.framerateLimit().get();
@@ -693,7 +693,8 @@ public class MetalWorldRenderer {
             long buildStart = System.nanoTime();
             long lodStart = System.nanoTime();
             refreshLodRing(mc);
-            if (frameCount % LOD_REFRESH_FRAME_INTERVAL == 0) {
+            if (frameCount % LOD_REFRESH_FRAME_INTERVAL == 0 && lodStart - lastLodTierNs >= LOD_TIER_MIN_INTERVAL_NS) {
+                lastLodTierNs = lodStart;
                 refreshLodTiers(mc);
                 updateLodRecencyEviction(mc);
             }
@@ -1043,12 +1044,12 @@ public class MetalWorldRenderer {
         return mc == null || mc.player == null;
     }
 
-    public void renderTerrainOpaque() {
+    public void renderTerrainOpaque(com.mojang.renderpearl.api.commands.RenderPass existing) {
         long ib = externalIndexBuffer;
         if (ib == 0 || !metalActive() || levelLoading()) {
             return;
         }
-        drawInBackendPass("metalrender_terrain", (encoder, width, height) -> {
+        drawInBackendPass("metalrender_terrain", existing, (encoder, width, height) -> {
             long drawPrepStart = System.nanoTime();
             int drawn = NativeBridge.nTerrainExternalDraw(encoder, ib, width, height);
             long nativeNs = System.nanoTime() - drawPrepStart;
@@ -1062,11 +1063,11 @@ public class MetalWorldRenderer {
         });
     }
 
-    public void renderTerrainTranslucent() {
+    public void renderTerrainTranslucent(com.mojang.renderpearl.api.commands.RenderPass existing) {
         if (externalIndexBuffer == 0 || !metalActive() || levelLoading()) {
             return;
         }
-        drawInBackendPass("metalrender_water", NativeBridge::nWaterExternalDraw);
+        drawInBackendPass("metalrender_water", existing, NativeBridge::nWaterExternalDraw);
     }
 
     public void endFrameExternal() {
@@ -1081,27 +1082,37 @@ public class MetalWorldRenderer {
         void draw(long encoder, int width, int height);
     }
 
-    private void drawInBackendPass(String label, ExternalDraw draw) {
+    private void drawInBackendPass(String label, com.mojang.renderpearl.api.commands.RenderPass existing,
+            ExternalDraw draw) {
+        if (existing != null) {
+            runBackendDraw(existing, label, draw);
+            return;
+        }
         Minecraft mc = Minecraft.getInstance();
         com.mojang.blaze3d.pipeline.RenderTarget target = mc != null ? mc.gameRenderer.mainRenderTarget() : null;
         if (target == null || target.getColorTextureView() == null) {
             return;
         }
-        try (com.mojang.blaze3d.systems.RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
+        try (com.mojang.renderpearl.api.commands.RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
                 .createRenderPass(() -> label, target.getColorTextureView(), java.util.Optional.empty(),
                         target.getDepthTextureView(), java.util.OptionalDouble.empty())) {
-            Object backend = ((com.pebbles_boon.metalrender.sodium.mixins.accessor.RenderPassAccessor) (Object) pass)
-                    .metalrender$getBackend();
-            if (!(backend instanceof com.pebbles_boon.metalrender.backend.metal.MetalRenderPassBackend metalPass)) {
-                return;
-            }
-            long encoder = metalPass.nativeRenderEncoder();
-            if (encoder == 0) {
-                return;
-            }
-            draw.draw(encoder, metalPass.targetWidth(), metalPass.targetHeight());
-            metalPass.restoreNativeState();
+            runBackendDraw(pass, label, draw);
         }
+    }
+
+    private void runBackendDraw(com.mojang.renderpearl.api.commands.RenderPass pass, String label,
+            ExternalDraw draw) {
+        Object backend = ((com.pebbles_boon.metalrender.sodium.mixins.accessor.RenderPassAccessor) (Object) pass)
+                .metalrender$getBackend();
+        if (!(backend instanceof com.pebbles_boon.metalrender.backend.metal.MetalRenderPassBackend metalPass)) {
+            return;
+        }
+        long encoder = metalPass.nativeRenderEncoder("metalrender_terrain".equals(label));
+        if (encoder == 0) {
+            return;
+        }
+        draw.draw(encoder, metalPass.targetWidth(), metalPass.targetHeight());
+        metalPass.restoreNativeState();
     }
 
     public MetalCloudRenderer getCloudRenderer() {
@@ -1457,9 +1468,17 @@ public class MetalWorldRenderer {
                 }
             }
         }
-        if (pendingBuildSet.size() < CHUNK_SCAN_SATURATED_THRESHOLD ||
-                (frameCount & 1) == 0) {
-            long scanStart = System.nanoTime();
+        long scanGateNs = System.nanoTime();
+        boolean scanDue = scanGateNs - lastScanCallNs >= SCAN_MIN_INTERVAL_NS
+                || scanDirty
+                || mc.player == null
+                || mc.player.chunkPosition().x() != lastScanPlayerCX
+                || mc.player.chunkPosition().z() != lastScanPlayerCZ;
+        if (scanDue && (pendingBuildSet.size() < CHUNK_SCAN_SATURATED_THRESHOLD ||
+                (frameCount & 1) == 0)) {
+            long scanStart = scanGateNs;
+            lastScanCallNs = scanGateNs;
+            scanNowNs = scanGateNs;
             scanForPendingChunks(mc);
             long scanNs = System.nanoTime() - scanStart;
             lastScanMs = scanNs / 1_000_000.0;
@@ -1516,6 +1535,10 @@ public class MetalWorldRenderer {
     private int scanFrameCounter = 0;
     private int scanFrontierRing = 0;
     private long lastFullRescanNs = 0L;
+
+    private static final long SCAN_MIN_INTERVAL_NS = 16_000_000L;
+    private long lastScanCallNs;
+    private long scanNowNs;
 
     private void scanForPendingChunks(Minecraft mc) {
         ClientLevel world = mc.level;
@@ -1745,7 +1768,8 @@ public class MetalWorldRenderer {
         LevelChunkSection[] sections = chunk.getSections();
         int maxVerticalRange = getScanVerticalRange(chunkDistance);
         long scanKey = ((long) chunkX << 32) ^ (chunkZ & 0xFFFFFFFFL);
-        long scanStamp = chunkMesher.getConnectivityGeneration() * 0x9E3779B97F4A7C15L
+        long scanEpoch = (scanNowNs + ((scanKey * 0x9E3779B97F4A7C15L) >>> 34)) >> 30;
+        long scanStamp = (scanEpoch + (chunkMesher.getConnectivityGeneration() & 0xFFFFFFFFL)) * 0x9E3779B97F4A7C15L
                 + System.identityHashCode(chunk) * 31L + playerSectionY * 1000003L + maxVerticalRange;
         if (scanStamp != 0L && scannedChunkStamps.get(scanKey) == scanStamp)
             return;
@@ -2114,6 +2138,13 @@ public class MetalWorldRenderer {
         return textureManager;
     }
 
+    private static final long LOD_TIER_MIN_INTERVAL_NS = 33_000_000L;
+    private static final long LOD_RING_MIN_INTERVAL_NS = 8_000_000L;
+    private long lastLodTierNs;
+    private long lodRingLastRunNs;
+    private boolean lodRingIdle;
+    private boolean lodRingCycleBusy;
+
     private void refreshLodRing(Minecraft mc) {
         MetalRenderConfig config = MetalRenderClient.getConfig();
         if (config == null || mc.player == null || !config.enableDistanceLod) {
@@ -2144,7 +2175,14 @@ public class MetalWorldRenderer {
         int maxInFlight = currentInFlightBudget();
         int reserveSlots = fpsPriorityMode ? 0 : RESERVED_PRIORITY_IN_FLIGHT_SLOTS;
         boolean saturated = chunkMesher.getPendingCount() >= maxInFlight - reserveSlots;
+        long lodRingNowNs = System.nanoTime();
         if (!moved) {
+            if (lodRingNowNs - lodRingLastRunNs < LOD_RING_MIN_INTERVAL_NS) {
+                return;
+            }
+            if (lodRingIdle && meshGen == lodRingMeshGen && (frameCount & 7) != 0) {
+                return;
+            }
             if (!lodRingBacklog && meshGen == lodRingMeshGen) {
                 return;
             }
@@ -2155,6 +2193,7 @@ public class MetalWorldRenderer {
         boolean rebuildAllowed = !saturated
                 && pendingBuildSet.size() + chunkMesher.getPendingCount() < CHUNK_BACKLOG_PRESSURE_THRESHOLD;
         lodRingRunFrame = frameCount;
+        lodRingLastRunNs = lodRingNowNs;
         lodRingPlayerCX = playerChunkX;
         lodRingPlayerCZ = playerChunkZ;
         lodRingMeshGen = meshGen;
@@ -2302,6 +2341,13 @@ public class MetalWorldRenderer {
             lodRingCursor = (sliceStart + slice) % meshCount;
             if (slice < meshCount) {
                 lodRingBacklog = true;
+            }
+            if (!upgrades.isEmpty() || !demotions.isEmpty() || moved) {
+                lodRingCycleBusy = true;
+            }
+            if (sliceStart + slice >= meshCount) {
+                lodRingIdle = !lodRingCycleBusy;
+                lodRingCycleBusy = false;
             }
         }
 
