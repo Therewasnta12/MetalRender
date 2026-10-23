@@ -1,6 +1,6 @@
 package com.pebbles_boon.metalrender.sodium.mixins;
 
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.framegraph.FrameGraphBuilder;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.render.MetalWorldRenderer;
@@ -33,7 +33,7 @@ public class LevelCloudWeatherMixin {
     }
 
     @Inject(method = "addWeatherPass(Lcom/mojang/blaze3d/framegraph/FrameGraphBuilder;"
-            + "Lcom/mojang/blaze3d/buffers/GpuBufferSlice;)V", at = @At("HEAD"), cancellable = true, require = 0)
+            + "Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;)V", at = @At("HEAD"), cancellable = true, require = 0)
     private void metalrender$suppressVanillaWeather(FrameGraphBuilder builder,
             GpuBufferSlice fogBuffer, CallbackInfo ci) {
         if (metalrender$shouldSuppressAtmosphere()) {

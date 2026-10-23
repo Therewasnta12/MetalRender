@@ -1,6 +1,6 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.systems.GpuQueryPool;
+import com.mojang.renderpearl.api.commands.GpuQueryPool;
 import java.util.Arrays;
 import java.util.OptionalLong;
 

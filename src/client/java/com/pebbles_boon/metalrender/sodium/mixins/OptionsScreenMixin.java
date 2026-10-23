@@ -17,7 +17,7 @@ public abstract class OptionsScreenMixin extends Screen {
     }
 
     @Dynamic
-    @Inject(method = "lambda$init$3", at = @At("HEAD"), cancellable = true, require = 0)
+    @Inject(method = "lambda$init$2", at = @At("HEAD"), cancellable = true, require = 0)
     private void metalrender$openSettings(CallbackInfoReturnable<Screen> cir) {
         cir.setReturnValue(new MetalRenderSettingsScreen(this));
     }

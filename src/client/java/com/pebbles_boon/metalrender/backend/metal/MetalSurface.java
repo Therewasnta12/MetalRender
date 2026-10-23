@@ -2,8 +2,9 @@ package com.pebbles_boon.metalrender.backend.metal;
 
 import com.mojang.blaze3d.platform.Window;
 import net.minecraft.client.Minecraft;
-import org.lwjgl.glfw.GLFW;
-import org.lwjgl.glfw.GLFWNativeCocoa;
+import org.lwjgl.sdl.SDLProperties;
+import org.lwjgl.sdl.SDLVideo;
+import org.lwjgl.system.MemoryStack;
 
 final class MetalSurface {
     private final long window;
@@ -18,21 +19,29 @@ final class MetalSurface {
         vsync = vsync && !UNCAPPED;
         this.window = window;
         this.vsync = vsync;
-        long nsWindow = GLFWNativeCocoa.glfwGetCocoaWindow(window);
+        long nsWindow = SDLProperties.SDL_GetPointerProperty(SDLVideo.SDL_GetWindowProperties(window),
+                SDLVideo.SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, 0L);
         if (nsWindow == 0) {
-            throw new IllegalStateException("GLFW window has no Cocoa window");
+            throw new IllegalStateException("SDL window has no Cocoa window");
         }
-        int[] w = new int[1];
-        int[] h = new int[1];
-        GLFW.glfwGetFramebufferSize(window, w, h);
-        this.width = Math.max(1, w[0]);
-        this.height = Math.max(1, h[0]);
+        int[] size = pixelSize(window);
+        this.width = Math.max(1, size[0]);
+        this.height = Math.max(1, size[1]);
         this.layer = MetalNative.nSurfaceCreate(nsWindow, width, height, vsync);
         if (layer == 0) {
             throw new IllegalStateException("CAMetalLayer creation failed: " + MetalNative.nLastError());
         }
         MetalNative.nSetPacedPresent(
                 com.pebbles_boon.metalrender.config.MetalRenderConfig.getBool("metalrender.pacedPresent", true));
+    }
+
+    private static int[] pixelSize(long window) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            java.nio.IntBuffer w = stack.mallocInt(1);
+            java.nio.IntBuffer h = stack.mallocInt(1);
+            SDLVideo.SDL_GetWindowSizeInPixels(window, w, h);
+            return new int[] {w.get(0), h.get(0)};
+        }
     }
 
     long layer() {
@@ -48,11 +57,9 @@ final class MetalSurface {
             w = mcWindow.getWidth();
             h = mcWindow.getHeight();
         } else {
-            int[] fw = new int[1];
-            int[] fh = new int[1];
-            GLFW.glfwGetFramebufferSize(window, fw, fh);
-            w = fw[0];
-            h = fh[0];
+            int[] size = pixelSize(window);
+            w = size[0];
+            h = size[1];
         }
         if (w > 0 && h > 0 && (w != width || h != height)) {
             width = w;

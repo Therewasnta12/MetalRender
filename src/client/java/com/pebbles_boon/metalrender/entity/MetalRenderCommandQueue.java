@@ -1,6 +1,6 @@
 package com.pebbles_boon.metalrender.entity;
 
-import com.mojang.blaze3d.opengl.GlTexture;
+import com.mojang.renderpearl.backend.opengl.GlTexture;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import java.lang.reflect.Method;
@@ -84,19 +84,18 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
     @Override
     public <S> void submitModel(Model<? super S> model, S state,
             PoseStack matrices, RenderType layer, int light,
-            int overlay, int color, TextureAtlasSprite sprite,
-            int flags,
-            ModelFeatureRenderer.CrumblingOverlay crumbling) {
+            int overlay, int color, net.minecraft.client.renderer.texture.UvMapping uvMapping,
+            int flags) {
         if (model == null) {
             return;
         }
         int start = currentVertexCount();
         invokeSetupAnim(model, state);
-        VertexConsumer target = sprite != null ? sprite.wrap(vertexConsumer) : vertexConsumer;
+        VertexConsumer target = uvMapping != null ? uvMapping.wrap(vertexConsumer) : vertexConsumer;
         invokeRenderToBuffer(model, matrices, target, light, overlay, color);
         int end = currentVertexCount();
         if (start >= 0 && end > start) {
-            int glId = resolveSpriteOrLayerTexture(sprite, layer);
+            int glId = resolveSpriteOrLayerTexture(null, layer);
             if (glId != 0) {
                 requestedGlTextureId = glId;
             }
@@ -328,6 +327,11 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
     }
 
     @Override
+    public void submitTextBackground(PoseStack matrices, float x, float y, float width, float height,
+            int color, Font.DisplayMode layerType, int light) {
+    }
+
+    @Override
     public void submitFlame(PoseStack matrices, EntityRenderState state,
             Quaternionf rotation) {
     }
@@ -499,15 +503,31 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
     }
 
     @Override
+    public <S> void submitCrumblingOverlay(Model<? super S> model, S state, PoseStack matrices,
+            RenderType layer, int light, int overlay, int color,
+            ModelFeatureRenderer.CrumblingOverlay crumbling) {
+    }
+
+    private static java.util.List<?> breakingLocations() {
+        try {
+            java.lang.reflect.Field f = ModelBakery.class.getDeclaredField("BREAKING_LOCATIONS");
+            f.setAccessible(true);
+            return (java.util.List<?>) f.get(null);
+        } catch (ReflectiveOperationException e) {
+            return java.util.List.of();
+        }
+    }
+
+    @Override
     public void submitBreakingBlockModel(PoseStack matrices,
-            List<BlockStateModelPart> parts, int progress) {
+            List<BlockStateModelPart> parts, int progress, boolean oit) {
         if (matrices == null || parts == null || progress < 0 ||
-                progress >= ModelBakery.DESTROY_STAGE_COUNT ||
+                progress >= breakingLocations().size() ||
                 !(vertexConsumer instanceof MetalVertexConsumer mvc)) {
             return;
         }
         AbstractTexture texture = Minecraft.getInstance().getTextureManager()
-                .getTexture(ModelBakery.BREAKING_LOCATIONS.get(progress));
+                .getTexture((net.minecraft.resources.Identifier) breakingLocations().get(progress));
         if (!(texture.getTexture() instanceof GlTexture gl)) return;
         int start = mvc.getVertexCount();
         for (BlockStateModelPart part : parts) {
@@ -553,14 +573,15 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
     @Override
     public void submitItem(PoseStack matrices, ItemDisplayContext context,
             int light, int overlay, int color, int[] tintColors,
-            List<BakedQuad> quads,
+            net.minecraft.client.resources.model.geometry.ItemQuads itemQuads,
             ItemStackRenderState.FoilType foilType) {
-        if (matrices == null || quads == null || quads.isEmpty() || vertexConsumer == null) {
+        if (matrices == null || itemQuads == null || itemQuads.isEmpty() || vertexConsumer == null) {
             return;
         }
         if (!(vertexConsumer instanceof MetalVertexConsumer metalVertexConsumer)) {
             return;
         }
+        List<BakedQuad> quads = itemQuads.all();
         int start = currentVertexCount();
         int actualLight = light != 0 ? light : (defaultLight != 0 ? defaultLight : 0x00F000F0);
         for (BakedQuad quad : quads) {
@@ -572,7 +593,7 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
             int emission;
             try {
                 tintIndex = quad.materialInfo().tintIndex();
-                shade = quad.materialInfo().shade();
+                shade = true;
                 emission = quad.materialInfo().lightEmission();
             } catch (Exception ignored) {
                 tintIndex = -1;
@@ -738,7 +759,7 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
         int emission;
         try {
             tintIndex = quad.materialInfo().tintIndex();
-            shade = quad.materialInfo().shade();
+            shade = true;
             emission = quad.materialInfo().lightEmission();
         } catch (Exception ignored) {
             tintIndex = -1;
@@ -773,7 +794,7 @@ public class MetalRenderCommandQueue implements SubmitNodeCollector {
         int emission;
         try {
             tintIndex = quad.materialInfo().tintIndex();
-            shade = quad.materialInfo().shade();
+            shade = true;
             emission = quad.materialInfo().lightEmission();
         } catch (Exception ignored) {
             tintIndex = -1;

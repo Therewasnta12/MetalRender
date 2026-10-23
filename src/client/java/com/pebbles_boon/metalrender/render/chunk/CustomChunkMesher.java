@@ -423,7 +423,7 @@ public class CustomChunkMesher {
             boolean gpuCull = MetalRenderConfig.getBool("metalrender.gpuCull", true);
             boolean oracle = MetalRenderConfig.getBool("metalrender.cullOracle", false);
             arenaReady = NativeBridge.nArenaConfigure(renderDistanceChunks, capMb, gpuCull, oracle);
-            NativeBridge.nSetArenaHizCull(MetalRenderConfig.getBool("metalrender.hizCull", true));
+            NativeBridge.nSetArenaHizCull(MetalRenderConfig.getBool("metalrender.hizCull", false));
             MetalLogger.info("terrain arena %s (cap %d MB, gpuCull=%s, oracle=%s)", arenaReady ? "ready" : "unavailable",
                     capMb, gpuCull, oracle);
         } catch (Throwable t) {
@@ -1370,14 +1370,22 @@ public class CustomChunkMesher {
                 : null;
     }
 
+    private static final long SNAPSHOT_MIN_INTERVAL_NS = 100_000_000L;
+    private long cachedSnapshotNs;
+
     private void refreshCachedMeshSnapshot() {
         int currentGen = meshUpdateGeneration.get();
         if (cachedSnapshotGen != currentGen) {
+            long now = System.nanoTime();
+            if (!cachedMeshSnapshot.isEmpty() && now - cachedSnapshotNs < SNAPSHOT_MIN_INTERVAL_NS) {
+                return;
+            }
             synchronized (meshCache) {
                 cachedMeshSnapshot.clear();
                 cachedMeshSnapshot.addAll(meshCache.values());
             }
             cachedSnapshotGen = currentGen;
+            cachedSnapshotNs = now;
         }
     }
 
@@ -2326,7 +2334,7 @@ public class CustomChunkMesher {
                     try {
                         boolean vb = false;
                         try {
-                            vb = state.isViewBlocking(world, pos);
+                            vb = state.isViewBlocking(world, pos, new net.minecraft.world.phys.AABB(pos));
                         } catch (Exception ignored) {
                         }
                         int damp = 0;
@@ -3225,6 +3233,8 @@ public class CustomChunkMesher {
 
         private void greedyForDirection(Direction dir,
                 it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<GreedyStateInfo> stateCache) {
+            int lastStateId = -1;
+            GreedyStateInfo lastStateInfo = null;
             int dirIdx = dir.get3DDataValue();
             int sx = dir.getStepX();
             int sy = dir.getStepY();
@@ -3292,7 +3302,14 @@ public class CustomChunkMesher {
                         } catch (Exception ignored) {
                             continue;
                         }
-                        GreedyStateInfo sinfo = getGreedyStateInfo(stateId, stateCache);
+                        GreedyStateInfo sinfo;
+                        if (stateId == lastStateId) {
+                            sinfo = lastStateInfo;
+                        } else {
+                            sinfo = getGreedyStateInfo(stateId, stateCache);
+                            lastStateId = stateId;
+                            lastStateInfo = sinfo;
+                        }
                         GreedyTemplate template = sinfo.byDir[dirIdx];
                         if (template == null)
                             continue;
@@ -3556,59 +3573,73 @@ public class CustomChunkMesher {
         }
 
         private boolean isCrossLike(BlockState state, BlockStateModel model, RandomSource random,
-                BlockPos pos, int lx, int ly, int lz) {
-            try {
-                if (state.isAir() || state.isSolidRender()) {
-                    return false;
-                }
-                if (state.getRenderShape() != net.minecraft.world.level.block.RenderShape.MODEL) {
-                    return false;
-                }
-                java.util.ArrayList<BlockStateModelPart> parts = PARTS_POOL.get();
-                int savedSize = parts.size();
-                try {
-                    random.setSeed(state.getSeed(pos));
-                } catch (RuntimeException ignored) {
-                }
-                model.collectParts(random, parts);
-                try {
-                    for (int i = savedSize; i < parts.size(); i++) {
-                        BlockStateModelPart part = parts.get(i);
-                        if (part == null) {
-                            continue;
-                        }
-                        for (Direction direction : ALL_DIRECTIONS) {
-                            List<BakedQuad> quads;
-                            try {
-                                quads = part.getQuads(direction);
-                            } catch (RuntimeException ignored) {
-                                continue;
-                            }
-                            if (quads == null || quads.isEmpty()) {
-                                continue;
-                            }
-                            boolean anyKept = false;
-                            for (BakedQuad quad : quads) {
-                                if (quad == null) {
-                                    continue;
-                                }
-                                anyKept = true;
-                                break;
-                            }
-                            if (anyKept && !shouldCullFace(lx, ly, lz, direction, state)) {
-                                return false;
-                            }
-                        }
-                    }
-                } finally {
-                    while (parts.size() > savedSize) {
-                        parts.remove(parts.size() - 1);
-                    }
-                }
-                return true;
-            } catch (Exception ignored) {
+                BlockPos pos) {
+            if (state.isAir() || state.isSolidRender()) {
                 return false;
             }
+            java.util.ArrayList<BlockStateModelPart> parts = PARTS_POOL.get();
+            int savedSize = parts.size();
+            try {
+                random.setSeed(state.getSeed(pos));
+                model.collectParts(random, parts);
+                int orientations = 0;
+                for (int i = savedSize; i < parts.size(); i++) {
+                    BlockStateModelPart part = parts.get(i);
+                    if (part == null) {
+                        continue;
+                    }
+                    for (Direction direction : ALL_DIRECTIONS) {
+                        List<BakedQuad> quads = part.getQuads(direction);
+                        if (quads != null && !quads.isEmpty()) {
+                            return false;
+                        }
+                    }
+                    List<BakedQuad> quads = part.getQuads(null);
+                    if (quads == null) {
+                        continue;
+                    }
+                    for (BakedQuad quad : quads) {
+                        if (quad == null) {
+                            continue;
+                        }
+                        int orientation = crossQuadOrientation(quad);
+                        if (orientation == 0) {
+                            return false;
+                        }
+                        orientations |= orientation;
+                    }
+                }
+                return orientations == 3;
+            } catch (RuntimeException ignored) {
+                return false;
+            } finally {
+                while (parts.size() > savedSize) {
+                    parts.remove(parts.size() - 1);
+                }
+            }
+        }
+
+        private static int crossQuadOrientation(BakedQuad quad) {
+            org.joml.Vector3fc a = quad.position(0);
+            org.joml.Vector3fc b = quad.position(1);
+            org.joml.Vector3fc c = quad.position(2);
+            float ux = b.x() - a.x(), uy = b.y() - a.y(), uz = b.z() - a.z();
+            float vx = c.x() - a.x(), vy = c.y() - a.y(), vz = c.z() - a.z();
+            float nx = uy * vz - uz * vy;
+            float ny = uz * vx - ux * vz;
+            float nz = ux * vy - uy * vx;
+            float scale = Math.max(Math.abs(nx), Math.abs(nz));
+            float eps = 1.0e-4f;
+            if (scale < eps || Math.abs(ny) > eps * scale
+                    || Math.min(Math.abs(nx), Math.abs(nz)) < eps * scale) {
+                return 0;
+            }
+            org.joml.Vector3fc d = quad.position(3);
+            if (Math.abs(nx * (d.x() - a.x()) + ny * (d.y() - a.y())
+                    + nz * (d.z() - a.z())) > eps * scale) {
+                return 0;
+            }
+            return nx * nz > 0 ? 1 : 2;
         }
 
         private void renderBlockModel(BlockStateModel model, BlockState state, BlockPos pos,
@@ -3619,16 +3650,10 @@ public class CustomChunkMesher {
             } catch (RuntimeException ignored) {
                 blockEmitsLight = false;
             }
-            boolean crossLike = false;
-            if (lodTier >= 2 && !state.isSolidRender()) {
-                crossLike = isCrossLike(state, model, random, pos, lx, ly, lz);
-                if (crossLike) {
-                    return;
-                }
-            } else {
-                crossLike = isCrossLike(state, model, random, pos, lx, ly, lz);
+            boolean crossLike = isCrossLike(state, model, random, pos);
+            if (lodTier >= 2 && crossLike) {
+                return;
             }
-            boolean skipDetailQuads = lodTier >= 2 && (state.isSolidRender() || crossLike);
             try {
                 random.setSeed(state.getSeed(pos));
                 java.util.ArrayList<BlockStateModelPart> parts = PARTS_POOL.get();
@@ -3663,7 +3688,7 @@ public class CustomChunkMesher {
                         }
                     }
                     try {
-                        List<BakedQuad> noCull = skipDetailQuads ? null : part.getQuads(null);
+                        List<BakedQuad> noCull = part.getQuads(null);
                         if (noCull != null) {
                             for (BakedQuad quad : noCull) {
                                 if (quad != null) {
@@ -4114,10 +4139,11 @@ public class CustomChunkMesher {
             detailOverride = keepDetail;
             GrowableStagingBuffer target = water ? waterBuffer : solidBuffer;
             Direction face = quad.direction();
-            byte normalIndex = (byte) (face != null ? face.get3DDataValue() : 6);
-            float shade = quad.materialInfo().shade() && normalIndex >= 0
-                    && normalIndex < context.faceShade.length
-                            ? context.faceShade[normalIndex]
+            byte normalIndex = (byte) (face != null && state.isSolidRender()
+                    ? face.get3DDataValue() : 6);
+            float shade = !crossLike && face != null
+                    && face.get3DDataValue() < context.faceShade.length
+                            ? context.faceShade[face.get3DDataValue()]
                             : 1.0f;
 
             boolean isLeaves = state.getBlock() instanceof LeavesBlock;
@@ -4185,7 +4211,12 @@ public class CustomChunkMesher {
 
                 byte light;
                 float ao;
-                if (lodTier >= 2 && !keepDetail) {
+                if (crossLike) {
+                    light = getPaddedLight(lx, ly, lz);
+                    int bl = Math.max(light & 0xF, Math.min(15, quad.materialInfo().lightEmission()));
+                    light = (byte) ((light & 0xF0) | bl);
+                    ao = 1.0f;
+                } else if (lodTier >= 2 && !keepDetail) {
                     light = computeFaceLightFast(lx, ly, lz, face, quad.materialInfo().lightEmission());
                     ao = 1.0f;
                 } else {
@@ -4193,16 +4224,6 @@ public class CustomChunkMesher {
                             pos.z(), quad.materialInfo().lightEmission(), forceFlat);
                     light = (byte) ((computedBlock & 0xF) | ((computedSky & 0xF) << 4));
                     ao = computedAO;
-                    if (crossLike) {
-                        byte above = getPaddedLight(lx, ly + 1, lz);
-                        int bl = Math.max(light & 0xF, above & 0xF);
-                        int sl = Math.max((light >> 4) & 0xF, (above >> 4) & 0xF);
-                        int emission = quad.materialInfo().lightEmission();
-                        if (emission > 0) {
-                            bl = Math.max(bl, Math.min(15, emission));
-                        }
-                        light = (byte) ((bl & 0xF) | ((sl & 0xF) << 4));
-                    }
                 }
 
                 float fr, fg, fb;

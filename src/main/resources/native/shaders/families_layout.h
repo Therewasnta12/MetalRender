@@ -15,6 +15,7 @@
 #define MR_SLOT_POST_CONFIG 26
 #define MR_SLOT_ROTSCALE_CONFIG 27
 #define MR_SLOT_CLOUD_FACES 28
+#define MR_SLOT_TERRAIN_UNIFORM 29
 
 #define MR_TEX_CUBE 15
 
@@ -139,7 +140,8 @@
 #define MR_BLOCK_ROTSCALE_CONFIG 14
 #define MR_BLOCK_SPIDER_CONFIG 15
 #define MR_BLOCK_CLOUD_INFO 16
-#define MR_BLOCK_COUNT 17
+#define MR_BLOCK_TERRAIN_UNIFORM 17
+#define MR_BLOCK_COUNT 18
 
 struct MRProjection {
   float ProjMat[16];
@@ -147,10 +149,9 @@ struct MRProjection {
 
 struct MRDynamicTransforms {
   float ModelViewMat[16];
+  float TextureMat[16];
   float ColorModulator[4];
   float ModelOffset[3];
-  float _pad0;
-  float TextureMat[16];
 };
 
 struct MRFog {
@@ -165,12 +166,10 @@ struct MRFog {
 
 struct MRGlobals {
   int CameraBlockPos[3];
-  float _pad0;
-  float CameraOffset[3];
-  float _pad1;
-  float ScreenSize[2];
   float GlintAlpha;
+  float CameraOffset[3];
   float GameTime;
+  float ScreenSize[2];
   int MenuBlurRadius;
   int UseRgss;
 };
@@ -179,16 +178,16 @@ struct MRLighting {
   float Light0_Direction[3];
   float _pad0;
   float Light1_Direction[3];
-  float _pad1;
 };
 
 struct MRChunkSection {
-  float ModelViewMat[16];
-  float ChunkVisibility;
-  float _pad0;
-  int TextureSize[2];
   int ChunkPosition[3];
-  float _pad1;
+  float ChunkVisibility;
+};
+
+struct MRTerrainUniform {
+  float ModelViewMat[16];
+  int TextureSize[2];
 };
 
 struct MRLightmapInfo {
@@ -206,7 +205,6 @@ struct MRLightmapInfo {
   float AmbientColor[3];
   float _pad3;
   float NightVisionColor[3];
-  float _pad4;
 };
 
 struct MRSpriteAnimationInfo {
@@ -237,7 +235,6 @@ struct MRColorConfig {
   float GreenMatrix[3];
   float _pad1;
   float BlueMatrix[3];
-  float _pad2;
 };
 
 struct MRBitsConfig {
@@ -260,7 +257,6 @@ struct MRCloudInfo {
   float CloudOffset[3];
   float _pad0;
   float CellSize[3];
-  float _pad1;
 };
 
 struct MRSpiderConfig {

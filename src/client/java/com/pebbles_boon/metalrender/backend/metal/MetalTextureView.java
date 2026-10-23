@@ -1,8 +1,8 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.backend.common.BaseGpuTextureView;
 
-public final class MetalTextureView extends GpuTextureView {
+public final class MetalTextureView extends BaseGpuTextureView {
     private long handle;
     private boolean closed;
 

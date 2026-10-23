@@ -127,8 +127,8 @@ public class MinecraftClientMixin {
     }
 
     @Redirect(method = "renderFrame", at = @At(value = "INVOKE",
-            target = "Lcom/mojang/blaze3d/systems/GpuSurface;present()V"))
-    private void metalrender$timeFlip(com.mojang.blaze3d.systems.GpuSurface surface) {
+            target = "Lcom/mojang/renderpearl/api/device/GpuSurface;present()V"))
+    private void metalrender$timeFlip(com.mojang.renderpearl.api.device.GpuSurface surface) {
         long t0 = System.nanoTime();
         surface.present();
         MetalRenderProfiler.getInstance().recordSwap(t0, System.nanoTime());

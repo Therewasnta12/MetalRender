@@ -1,7 +1,6 @@
 package com.pebbles_boon.metalrender.gui;
 
-import com.mojang.blaze3d.platform.GLX;
-import com.mojang.blaze3d.systems.GpuDevice;
+import com.mojang.renderpearl.api.device.GpuDevice;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.util.MetalLogger;
@@ -127,7 +126,7 @@ public final class MetalDebugEntry implements DebugScreenEntry {
             List<String> rows = new ArrayList<>(5);
             rows.add(String.format(Locale.ROOT, "Java: %s",
                     System.getProperty("java.version")));
-            rows.add(String.format(Locale.ROOT, "CPU: %s", GLX._getCpuInfo()));
+            rows.add(String.format(Locale.ROOT, "CPU: %s", Runtime.getRuntime().availableProcessors() + " threads " + System.getProperty("os.arch")));
             rows.add(String.format(Locale.ROOT, "Display: %dx%d (%s)",
                     mc.getWindow().getWidth(),
                     mc.getWindow().getHeight(), dev.getDeviceInfo().vendorName()));

@@ -33,6 +33,7 @@ final class MetalBindings {
         BLOCKS.put("RotScaleConfig", new Block(27, 14));
         BLOCKS.put("SpiderConfig", new Block(26, 15));
         BLOCKS.put("CloudInfo", new Block(24, 16));
+        BLOCKS.put("TerrainUniform", new Block(29, 17));
 
         TEXTURES.put("Sampler0", 0);
         TEXTURES.put("Sampler1", 1);

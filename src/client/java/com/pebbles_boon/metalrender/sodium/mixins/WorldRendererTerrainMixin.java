@@ -1,6 +1,8 @@
 package com.pebbles_boon.metalrender.sodium.mixins;
 
-import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.renderpearl.api.commands.RenderPass;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.render.MetalWorldRenderer;
 import com.pebbles_boon.metalrender.util.MetalLogger;
@@ -39,36 +41,38 @@ public class WorldRendererTerrainMixin {
         return true;
     }
 
-    @Redirect(method = "lambda$addMainPass$0", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/chunk/"
+    @Redirect(method = "executeSolid", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/chunk/"
             + "ChunkSectionsToRender;renderGroup(Lnet/minecraft/"
             + "client/renderer/chunk/ChunkSectionLayerGroup;Lcom/"
-            + "mojang/blaze3d/textures/GpuSampler;)V", ordinal = 0), require = 0)
+            + "mojang/renderpearl/api/commands/RenderPass;Lcom/mojang/renderpearl/api/textures/GpuSampler;"
+            + "Lcom/mojang/renderpearl/api/textures/GpuTextureView;Z)V", ordinal = 0), require = 0)
     private void metalrender$skipOpaqueTerrainGroup(ChunkSectionsToRender sections,
-            ChunkSectionLayerGroup group,
-            GpuSampler sampler) {
+            ChunkSectionLayerGroup group, RenderPass pass,
+            GpuSampler sampler, GpuTextureView view, boolean wireframe) {
         if (metalrender$shouldSkipVanillaTerrain()) {
             if (MetalRenderClient.isBackendMode()) {
-                MetalRenderClient.getWorldRenderer().renderTerrainOpaque();
+                MetalRenderClient.getWorldRenderer().renderTerrainOpaque(pass);
             }
             return;
         }
-        sections.renderGroup(group, sampler);
+        sections.renderGroup(group, pass, sampler, view, wireframe);
     }
 
-    @Redirect(method = "lambda$addMainPass$0", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/chunk/"
+    @Redirect(method = "executeClassicTransparency", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/chunk/"
             + "ChunkSectionsToRender;renderGroup(Lnet/minecraft/"
             + "client/renderer/chunk/ChunkSectionLayerGroup;Lcom/"
-            + "mojang/blaze3d/textures/GpuSampler;)V", ordinal = 1), require = 0)
+            + "mojang/renderpearl/api/commands/RenderPass;Lcom/mojang/renderpearl/api/textures/GpuSampler;"
+            + "Lcom/mojang/renderpearl/api/textures/GpuTextureView;Z)V", ordinal = 0), require = 0)
     private void metalrender$skipTranslucentTerrainGroup(ChunkSectionsToRender sections,
-            ChunkSectionLayerGroup group,
-            GpuSampler sampler) {
+            ChunkSectionLayerGroup group, RenderPass pass,
+            GpuSampler sampler, GpuTextureView view, boolean wireframe) {
         if (metalrender$shouldSkipVanillaTerrain()) {
             if (MetalRenderClient.isBackendMode()) {
-                MetalRenderClient.getWorldRenderer().renderTerrainTranslucent();
+                MetalRenderClient.getWorldRenderer().renderTerrainTranslucent(pass);
             }
             return;
         }
-        sections.renderGroup(group, sampler);
+        sections.renderGroup(group, pass, sampler, view, wireframe);
     }
 
     @Inject(method = "lambda$addMainPass$0", at = @At("HEAD"), cancellable = true, require = 0)

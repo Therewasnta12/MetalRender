@@ -1,6 +1,6 @@
 package com.pebbles_boon.metalrender.sodium.mixins;
 
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.pebbles_boon.metalrender.MetalRenderClient;
@@ -43,13 +43,13 @@ public class WorldRendererBlitMixin {
 
     @Inject(method = "render", at = @At("HEAD"), require = 0)
     private void metalrender$beginWorldFrame(
-            GraphicsResourceAllocator allocator, DeltaTracker tickCounter,
-            boolean renderBlockOutline, CameraRenderState cameraRenderState,
-            Matrix4fc positionMatrix, GpuBufferSlice fogBuffer, Vector4f fogColor,
-            boolean renderEntityOutline,
+            GraphicsResourceAllocator allocator, boolean renderBlockOutline,
+            CameraRenderState cameraRenderState, GpuBufferSlice fogBuffer, Vector4f fogColor,
+            boolean renderEntityOutline, boolean extra,
             CallbackInfo ci) {
         metalrender$frameActive = false;
         metalrender$activeRenderer = null;
+        DeltaTracker tickCounter = Minecraft.getInstance().getDeltaTracker();
         if ((MetalRenderClient.isBackendMode() && !MetalWorldRenderer.legacyTerrainEnabled())
                 || !MetalRenderClient.isEnabled()) {
             return;
@@ -69,7 +69,7 @@ public class WorldRendererBlitMixin {
                     cameraRenderState.projectionMatrix != null) {
                 metalrender$projection.set(cameraRenderState.projectionMatrix);
             } else {
-                metalrender$projection.set(positionMatrix);
+                metalrender$projection.identity();
             }
             if (MetalRenderClient.isBackendMode()) {
                 CapturedMatrices.copyLevelProjection(metalrender$projection);
@@ -121,13 +121,13 @@ public class WorldRendererBlitMixin {
     @Inject(method = "addMainPass", at = @At("HEAD"), require = 0)
     private void metalrender$noteOutline(com.mojang.blaze3d.framegraph.FrameGraphBuilder frameGraph,
             net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame frame,
-            GpuBufferSlice fogBuffer, LevelRenderState renderState,
-            net.minecraft.util.profiling.ProfilerFiller profiler,
-            net.minecraft.client.renderer.chunk.ChunkSectionsToRender sections, CallbackInfo ci) {
+            GpuBufferSlice fogBuffer,
+            net.minecraft.client.renderer.chunk.ChunkSectionsToRender sections, boolean wireframe,
+            CallbackInfo ci) {
         metalrender$anyOutline = frame == null || frame.hasAnyOutline();
     }
 
-    @Inject(method = "doEntityOutline", at = @At("HEAD"), cancellable = true, require = 0)
+    @Inject(method = "executeOutline", at = @At("HEAD"), cancellable = true, require = 0)
     private void metalrender$skipIdleOutline(CallbackInfo ci) {
         if (metalrender$SKIP_IDLE_OUTLINE && !metalrender$anyOutline && MetalRenderClient.isBackendMode()) {
             ci.cancel();
@@ -136,10 +136,9 @@ public class WorldRendererBlitMixin {
 
     @Inject(method = "render", at = @At("RETURN"), require = 1)
     private void metalrender$endWorldFrame(
-            GraphicsResourceAllocator allocator, DeltaTracker tickCounter,
-            boolean renderBlockOutline, CameraRenderState cameraRenderState,
-            Matrix4fc positionMatrix, GpuBufferSlice fogBuffer, Vector4f fogColor,
-            boolean renderEntityOutline,
+            GraphicsResourceAllocator allocator, boolean renderBlockOutline,
+            CameraRenderState cameraRenderState, GpuBufferSlice fogBuffer, Vector4f fogColor,
+            boolean renderEntityOutline, boolean extra,
             CallbackInfo ci) {
         if (!metalrender$frameActive) {
             return;

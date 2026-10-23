@@ -11,7 +11,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(targets = "net.minecraft.client.renderer.LevelRenderer", remap = false)
 public class LevelReadyMixin {
     @Inject(method = "isSectionCompiledAndVisible", at = @At("HEAD"), cancellable = true, require = 0)
-    private void metalrender$sectionReady(BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
+    private void metalrender$sectionReady(BlockPos pos, long sectionIndex, CallbackInfoReturnable<Boolean> cir) {
         if (!MetalRenderClient.isEnabled()) {
             return;
         }

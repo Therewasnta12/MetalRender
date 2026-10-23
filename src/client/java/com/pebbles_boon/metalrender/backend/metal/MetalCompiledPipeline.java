@@ -1,18 +1,19 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.GpuFormat;
-import com.mojang.blaze3d.PrimitiveTopology;
-import com.mojang.blaze3d.pipeline.BindGroupLayout;
-import com.mojang.blaze3d.pipeline.BlendFunction;
-import com.mojang.blaze3d.pipeline.ColorTargetState;
-import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
-import com.mojang.blaze3d.pipeline.DepthStencilState;
-import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.platform.CompareOp;
-import com.mojang.blaze3d.platform.BlendFactor;
-import com.mojang.blaze3d.platform.PolygonMode;
-import com.mojang.blaze3d.vertex.VertexFormat;
-import com.mojang.blaze3d.vertex.VertexFormatElement;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.pipeline.BindGroupLayout;
+import com.mojang.renderpearl.api.pipeline.BlendFunction;
+import com.mojang.renderpearl.api.pipeline.ColorTargetState;
+import com.mojang.renderpearl.api.pipeline.UniformType;
+import com.mojang.renderpearl.backend.api.BackendRenderPipeline;
+import com.mojang.renderpearl.api.pipeline.DepthStencilState;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.CompareOp;
+import com.mojang.renderpearl.api.pipeline.BlendFactor;
+import com.mojang.renderpearl.api.pipeline.PolygonMode;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
+import com.mojang.renderpearl.api.vertex.VertexFormatElement;
 import com.pebbles_boon.metalrender.util.MetalLogger;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -21,7 +22,7 @@ import java.util.Map;
 import java.util.Optional;
 import net.minecraft.client.renderer.ShaderDefines;
 
-public final class MetalCompiledPipeline implements CompiledRenderPipeline {
+public final class MetalCompiledPipeline implements BackendRenderPipeline {
     private static final int FC_HAS_BLEND = 0;
     private static final int FC_ALPHA_CUTOUT = 1;
     private static final int FC_NO_OVERLAY = 2;
@@ -45,6 +46,9 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
 
     private final MetalDeviceBackend device;
     private final RenderPipeline info;
+    private final String name;
+    private final List<String> uniformNames;
+    private boolean closed;
     private final FamilyTable.Family family;
     private final boolean drawable;
     private final int[] constants;
@@ -64,17 +68,29 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
     private final Map<Long, Long> states = new HashMap<>();
     private boolean failed;
 
-    MetalCompiledPipeline(MetalDeviceBackend device, RenderPipeline info) {
+    MetalCompiledPipeline(MetalDeviceBackend device, BackendRenderPipeline.CreateInfo create,
+            RenderPipeline info) {
         this.device = device;
         this.info = info;
-        this.family = FamilyTable.lookup(info);
-        this.drawable = FamilyTable.drawable(info, family);
-        VertexFormat[] bindings = info.getVertexFormatBindings();
-        VertexFormat format = bindings.length > 0 ? bindings[0] : null;
-        this.vertexLayout = buildVertexLayout(format);
-        this.samplers = BindGroupLayout.flattenSamplers(info.getBindGroupLayouts());
-        this.constants = buildConstants(info, format);
-        ColorTargetState color = info.getColorTargetState();
+        this.name = create.name();
+        this.family = info != null ? FamilyTable.lookup(info) : FamilyTable.Family.UNMAPPED;
+        this.drawable = info != null && FamilyTable.drawable(info, family);
+        List<VertexFormat> bindings = info != null ? info.getVertexFormatBindings() : List.of();
+        VertexFormat format = !bindings.isEmpty() ? bindings.get(0) : null;
+        this.vertexLayout = buildVertexLayout(create, format);
+        List<String> uniformList = new ArrayList<>();
+        List<String> samplerList = new ArrayList<>();
+        for (BindGroupLayout.UniformDescription u : create.uniforms()) {
+            uniformList.add(u.name());
+            if (u.type() == UniformType.COMBINED_IMAGE_SAMPLER) {
+                samplerList.add(u.name());
+            }
+        }
+        this.uniformNames = uniformList;
+        this.samplers = samplerList;
+        this.constants = buildConstants(create, info, format);
+        ColorTargetState color = create.colorTargetStates().isEmpty() ? ColorTargetState.DEFAULT
+                : create.colorTargetStates().get(0);
         Optional<BlendFunction> blendFunction = color.blendFunction();
         if (blendFunction.isPresent()) {
             BlendFunction b = blendFunction.get();
@@ -97,7 +113,7 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
             mask |= 1;
         }
         this.writeMask = mask;
-        PrimitiveTopology mode = info.getPrimitiveTopology();
+        PrimitiveTopology mode = create.primitiveTopology();
         this.triangleFan = mode == PrimitiveTopology.TRIANGLE_FAN;
         this.primitive = switch (mode) {
             case POINTS -> MetalNative.PRIMITIVE_POINT;
@@ -111,10 +127,10 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
             case DEBUG_LINES, LINES, DEBUG_LINE_STRIP -> MetalNative.TOPOLOGY_LINE;
             default -> MetalNative.TOPOLOGY_TRIANGLE;
         };
-        this.cullMode = info.isCull() ? MetalNative.CULL_BACK : MetalNative.CULL_NONE;
-        this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MetalNative.FILL_LINES
+        this.cullMode = create.cull() ? MetalNative.CULL_BACK : MetalNative.CULL_NONE;
+        this.fillMode = create.polygonMode() == PolygonMode.WIREFRAME ? MetalNative.FILL_LINES
                 : MetalNative.FILL;
-        DepthStencilState depth = info.getDepthStencilState();
+        DepthStencilState depth = create.depthStencilState();
         if (depth != null) {
             this.depthCompare = compare(depth.depthTest());
             this.depthWrite = depth.writeDepth();
@@ -129,8 +145,18 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
     }
 
     @Override
-    public boolean isValid() {
-        return !failed;
+    public boolean isClosed() {
+        return closed;
+    }
+
+    @Override
+    public void close() {
+        closed = true;
+        release();
+    }
+
+    List<String> uniformNames() {
+        return uniformNames;
     }
 
     List<String> samplers() {
@@ -150,7 +176,7 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
     }
 
     boolean drawsNothing() {
-        return drawable && !family.implemented();
+        return (drawable && !family.implemented()) || name.contains("oit_");
     }
 
     int primitive() {
@@ -199,6 +225,8 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
             vertexFunction = family.vertexFunction();
             fragmentFunction = family.fragmentFunction();
         } else {
+            MetalLogger.warn("FALLBACK pipeline %s info=%s family=%s drawable=%s", name, info != null, family,
+                    drawable);
             vertexFunction = vertexLayout == null ? "fallback_vertex_empty" : "fallback_vertex";
             fragmentFunction = "fallback_fragment";
         }
@@ -207,7 +235,7 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
                 blend, writeMask, topology);
         if (pso == 0) {
             failed = true;
-            MetalLogger.error("pipeline %s failed: %s", info.getLocation(), MetalNative.nLastError());
+            MetalLogger.error("pipeline %s failed: %s", name, MetalNative.nLastError());
             return 0;
         }
         states.put(key, pso);
@@ -220,6 +248,50 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
         }
         states.clear();
         failed = false;
+    }
+
+    private static int[] buildVertexLayout(BackendRenderPipeline.CreateInfo create, VertexFormat format) {
+        if (format == null || create.vertexBuffers().isEmpty()) {
+            return buildVertexLayout(format);
+        }
+        List<VertexFormatElement> elements = new ArrayList<>(format.getElements());
+        List<BackendRenderPipeline.CreateInfo.AttribBinding> bindings = new ArrayList<>(create.attribBindings());
+        bindings.sort(java.util.Comparator.comparingInt(BackendRenderPipeline.CreateInfo.AttribBinding::offset));
+        List<Integer> layout = new ArrayList<>();
+        layout.add(create.vertexBuffers().get(0).stride());
+        int cursor = 0;
+        for (BackendRenderPipeline.CreateInfo.AttribBinding binding : bindings) {
+            if (binding.bufferSlot() != 0) {
+                continue;
+            }
+            VertexFormatElement match = null;
+            for (int i = cursor; i < elements.size(); i++) {
+                if (elements.get(i).format() == binding.format()) {
+                    match = elements.get(i);
+                    cursor = i + 1;
+                    break;
+                }
+            }
+            if (match == null) {
+                continue;
+            }
+            int attribute = attributeIndex(match);
+            int metalFormat = vertexFormat(match);
+            if (attribute < 0 || metalFormat == 0) {
+                continue;
+            }
+            layout.add(attribute);
+            layout.add(metalFormat);
+            layout.add(binding.offset());
+        }
+        if (layout.size() == 1) {
+            return null;
+        }
+        int[] out = new int[layout.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = layout.get(i);
+        }
+        return out;
     }
 
     private static int[] buildVertexLayout(VertexFormat format) {
@@ -369,10 +441,12 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
         };
     }
 
-    private static int[] buildConstants(RenderPipeline info, VertexFormat format) {
+    private static int[] buildConstants(BackendRenderPipeline.CreateInfo create, RenderPipeline info,
+            VertexFormat format) {
         List<Integer> c = new ArrayList<>();
-        ShaderDefines defines = info.getShaderDefines();
-        boolean hasBlend = info.getColorTargetState().blendFunction().isPresent();
+        ShaderDefines defines = info != null ? info.getShaderDefines() : ShaderDefines.EMPTY;
+        boolean hasBlend = !create.colorTargetStates().isEmpty()
+                && create.colorTargetStates().get(0).blendFunction().isPresent();
         addBool(c, FC_HAS_BLEND, hasBlend);
         addBool(c, FC_NO_OVERLAY, defines.flags().contains("NO_OVERLAY"));
         addBool(c, FC_EMISSIVE, defines.flags().contains("EMISSIVE"));
@@ -401,8 +475,8 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
             } catch (NumberFormatException ignored) {
             }
         }
-        addInt(c, FC_VS_VARIANT, FamilyTable.vertexVariant(info));
-        addInt(c, FC_FS_VARIANT, FamilyTable.fragmentVariant(info));
+        addInt(c, FC_VS_VARIANT, info != null ? FamilyTable.vertexVariant(info) : -1);
+        addInt(c, FC_FS_VARIANT, info != null ? FamilyTable.fragmentVariant(info) : -1);
         addBool(c, FC_HAS_POSITION, format != null && format.contains("Position"));
         addBool(c, FC_HAS_COLOR, format != null && format.contains("Color"));
         addBool(c, FC_HAS_UV0, format != null && format.contains("UV0"));
@@ -412,7 +486,7 @@ public final class MetalCompiledPipeline implements CompiledRenderPipeline {
         addBool(c, FC_HAS_LINE_WIDTH, format != null && format.contains("LineWidth"));
         boolean projection = false;
         boolean transforms = false;
-        for (BindGroupLayout.UniformDescription u : BindGroupLayout.flattenUniforms(info.getBindGroupLayouts())) {
+        for (BindGroupLayout.UniformDescription u : create.uniforms()) {
             projection |= "Projection".equals(u.name());
             transforms |= "DynamicTransforms".equals(u.name());
         }

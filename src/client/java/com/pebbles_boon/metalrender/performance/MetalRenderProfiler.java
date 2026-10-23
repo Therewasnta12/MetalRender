@@ -151,7 +151,7 @@ public final class MetalRenderProfiler {
             + "quads_per_column,resident_quad_bytes,drawn_quads,gpu_ms,"
             + "frames_in_sec,frame_p50_ms,frame_p95_ms,frame_p99_ms,frame_max_ms,process_cpu_pct,rss_mb,"
             + "swap_ms,swap_to_swap_ms,limiter_ms,atlas_readback_ms,atlas_diff_ms,atlas_upload_ms,"
-            + "sections_loaded,sections_beyond_circle,cull_failsafe_frames,vanilla_compile_ms,compress_verify_bad,sections_walk_visible,cave_walk_ms,cave_walks,cave_walk_reuses,encoders_per_frame,presents_per_sec,skipped_presents,quads_tier_a,quads_tier_b,quads_tier_c,arena_live_mb,arena_capacity_mb,arena_free_mb,arena_holes,arena_high_mb,arena_bytes_per_quad,quad_verify_bad,cull_oracle_diff,particles_drawn,particles_culled,particle_ms,hiz_culled_sections,scene";
+            + "sections_loaded,sections_beyond_circle,cull_failsafe_frames,vanilla_compile_ms,compress_verify_bad,sections_walk_visible,cave_walk_ms,cave_walks,cave_walk_reuses,encoders_per_frame,presents_per_sec,skipped_presents,quads_tier_a,quads_tier_b,quads_tier_c,arena_live_mb,arena_capacity_mb,arena_free_mb,arena_holes,arena_high_mb,arena_bytes_per_quad,quad_verify_bad,cull_oracle_diff,particles_drawn,particles_culled,particle_ms,hiz_culled_sections,scene,face_cull_input,face_cull_removed,arena_cull_gpu_ms,drawn_quads_lod0,drawn_quads_lod1,drawn_quads_lod2";
 
     private MetalRenderProfiler() {
     }
@@ -422,14 +422,14 @@ public final class MetalRenderProfiler {
         long[] mega = nativeLongs(4, out -> NativeBridge.nGetMegaStats(out));
         double quadsPerColumn = access.quadsPerColumn;
         long residentQuadBytes = access.residentQuadBytes;
+        long[] quadStats = nativeLongs(7, out -> NativeBridge.nGetQuadStats(out));
         long drawnQuads = access.drawnQuads;
         if (drawnQuads == 0) {
-            long[] q = nativeLongs(4, out -> NativeBridge.nGetQuadStats(out));
-            drawnQuads = q[2];
+            drawnQuads = quadStats[2];
             if (residentQuadBytes == 0)
-                residentQuadBytes = q[1];
+                residentQuadBytes = quadStats[1];
             if (quadsPerColumn == 0)
-                quadsPerColumn = q[3];
+                quadsPerColumn = quadStats[3];
         }
         int compressAttempts = 0, compressSuccess = 0;
         String compressRejects = "";
@@ -488,7 +488,7 @@ public final class MetalRenderProfiler {
         previousPresents = backend[1];
         previousSkipped = backend[2];
         previousBackendNs = nowNs;
-        long[] arena = nativeLongs(10, out -> NativeBridge.nArenaStats(out));
+        long[] arena = nativeLongs(11, out -> NativeBridge.nArenaStats(out));
         long tierA = com.pebbles_boon.metalrender.render.chunk.QuadTiers.COUNT_A.sumThenReset();
         long tierB = com.pebbles_boon.metalrender.render.chunk.QuadTiers.COUNT_B.sumThenReset();
         long tierC = com.pebbles_boon.metalrender.render.chunk.QuadTiers.COUNT_C.sumThenReset();
@@ -501,6 +501,7 @@ public final class MetalRenderProfiler {
                     100.0 * totalTierA / total, 100.0 * totalTierB / total, 100.0 * totalTierC / total, total,
                     com.pebbles_boon.metalrender.render.chunk.QuadTiers.reasonSnapshot());
         }
+        int[] faceCull = wr.getCameraFacingCullStats();
         StringBuilder sb = new StringBuilder(1024);
         sb.append(tsMs).append(',').append(fmt(frameMs)).append(',').append(fmt(meshMs)).append(',')
                 .append(fmt(uploadMs)).append(',').append(fmt(cullMs)).append(',').append(fmt(scanOut)).append(',')
@@ -551,7 +552,11 @@ public final class MetalRenderProfiler {
                 .append(',').append(particlesCulledAcc.getAndSet(0))
                 .append(',').append(fmt(particleNsAcc.getAndSet(0) / 1_000_000.0))
                 .append(',').append(hizCulledSections())
-                .append(',').append('"').append(scene).append('"').append('\n');
+                .append(',').append('"').append(scene).append('"')
+                .append(',').append(faceCull[1]).append(',').append(faceCull[2])
+                .append(',').append(fmt(arena[10] / 1000.0))
+                .append(',').append(quadStats[4]).append(',').append(quadStats[5]).append(',').append(quadStats[6])
+                .append('\n');
         csvQueue.offer(sb.toString());
         if (chunksDrawn > 0) addSceneRow(pct, gpuMs, atlasOut, nativeDrawPrep, meshMs, uploadMs,
                 swapMs, swapToSwapMs, limiterMs, cpuPct, rss, access.meshCount, beyondCircle, failsafeDelta, vanillaCompileMs);

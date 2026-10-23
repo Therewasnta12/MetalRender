@@ -161,7 +161,7 @@ final class MetalNative {
 
     static native long nQueryValue(long query);
 
-    static native long nCtxRenderEncoder(long ctx);
+    static native long nCtxRenderEncoder(long ctx, boolean terrain);
 
     static native void nCtxRestoreViewport(long ctx);
 }

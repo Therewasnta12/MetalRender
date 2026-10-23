@@ -1,9 +1,10 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.GpuFormat;
+import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.api.GpuFormat;
+import com.mojang.renderpearl.backend.common.BaseGpuTexture;
 
-public final class MetalTexture extends GpuTexture {
+public final class MetalTexture extends BaseGpuTexture {
     private long handle;
     private final int pixelFormat;
     private final int textureType;

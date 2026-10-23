@@ -14,10 +14,14 @@ final class MetalStagingRing {
         long lastUseSerial;
         MetalBuffer wrapper;
 
+        boolean inUse(long completedSerial) {
+            return lastUseSerial > completedSerial || (wrapper != null && wrapper.lastUseFrame > completedSerial);
+        }
+
         Block(long handle, long contents, long capacity) {
             this.handle = handle;
             this.contents = contents;
-            this.capacity = capacity;
+            this.capacity = capacity; 
         }
     }
 
@@ -45,7 +49,7 @@ final class MetalStagingRing {
         Block chosen = null;
         for (int i = blocks.size() - 1; i >= 0; i--) {
             Block block = blocks.get(i);
-            if (block == current || block.lastUseSerial > completedSerial) {
+            if (block == current || block.inUse(completedSerial)) {
                 continue;
             }
             if (block.capacity > BLOCK_SIZE && block.capacity < size) {
@@ -77,7 +81,7 @@ final class MetalStagingRing {
     void trim(long completedSerial) {
         for (int i = blocks.size() - 1; i >= 0; i--) {
             Block block = blocks.get(i);
-            if (block != current && block.capacity > BLOCK_SIZE && block.lastUseSerial <= completedSerial) {
+            if (block != current && block.capacity > BLOCK_SIZE && !block.inUse(completedSerial)) {
                 MetalNative.nRelease(block.handle);
                 blocks.remove(i);
             }

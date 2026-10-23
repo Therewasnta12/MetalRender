@@ -1,11 +1,11 @@
 package com.pebbles_boon.metalrender.gui;
 
-import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.textures.FilterMode;
-import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.textures.GpuTextureView;
-import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.FilterMode;
+import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.api.textures.GpuSampler;
 import com.pebbles_boon.metalrender.MetalRenderClient;
 import com.pebbles_boon.metalrender.config.MetalRenderConfig;
 import com.pebbles_boon.metalrender.gui.components.MetalOptionSlider;
@@ -60,22 +60,27 @@ public class MetalRenderSettingsScreen extends Screen {
         private static RenderPipeline pipeline(RenderPipeline source, String name) {
             var builder = RenderPipeline.builder()
                     .withLocation(Identifier.fromNamespaceAndPath("metalrender", "pipeline/" + name))
-                    .withVertexShader(source.getVertexShader())
-                    .withFragmentShader(Identifier.fromNamespaceAndPath("metalrender", "core/" + name))
+                    .withVertexShader(source.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX))
+                    .withFragmentShader(source.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.FRAGMENT))
+                    .withShaderDefine(name.equals("glass") ? "METALRENDER_GLASS" : "METALRENDER_GLASS_BLUR")
                     .withPrimitiveTopology(source.getPrimitiveTopology())
-                    .withColorTargetState(source.getColorTargetState())
+                    .withColorTargetState(source.getColorTargetStates().get(0))
                     .withDepthStencilState(java.util.Optional.ofNullable(source.getDepthStencilState())).withCull(false);
-            if (source.getVertexFormatBindings().length > 0)
+            if (!source.getVertexFormatBindings().isEmpty())
                 builder.withVertexBinding(0, source.getVertexFormatBinding(0));
-            var layout = com.mojang.blaze3d.pipeline.BindGroupLayout.builder();
-            var existing = com.mojang.blaze3d.pipeline.BindGroupLayout.flattenSamplers(source.getBindGroupLayouts());
+            var layout = com.mojang.renderpearl.api.pipeline.BindGroupLayout.builder();
+            var existing = com.mojang.renderpearl.api.pipeline.BindGroupLayout.flattenUniforms(source.getBindGroupLayouts()).stream()
+                    .filter(u -> u.type() == com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER)
+                    .map(com.mojang.renderpearl.api.pipeline.BindGroupLayout.UniformDescription::name).toList();
             String sampler = name.equals("glass") ? "Sampler0" : "InSampler";
             if (!existing.contains(sampler))
-                layout.withSampler(sampler);
+                layout.withUniform(sampler, com.mojang.renderpearl.api.pipeline.UniformType.COMBINED_IMAGE_SAMPLER);
             builder.withBindGroupLayout(layout.build());
             for (var other : source.getBindGroupLayouts())
                 builder.withBindGroupLayout(other);
-            return builder.build();
+            RenderPipeline built = builder.build();
+            com.pebbles_boon.metalrender.backend.metal.FamilyTable.register(built);
+            return built;
         }
 
         void prepare() {
@@ -103,15 +108,15 @@ public class MetalRenderSettingsScreen extends Screen {
             var encoder = RenderSystem.getDevice().createCommandEncoder();
             var sampler = RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR);
             try (var pass = encoder.createRenderPass(() -> "Settings glass downsample", sceneView, java.util.Optional.empty())) {
-                pass.setPipeline(RenderPipelines.ENTITY_OUTLINE_BLIT);
+                pass.setPipeline(RenderSystem.getCompiledPipeline(BLUR));
                 RenderSystem.bindDefaultUniforms(pass);
-                pass.bindTexture("InSampler", Minecraft.getInstance().gameRenderer.mainRenderTarget().getColorTextureView(), sampler);
+                pass.setUniform("InSampler", Minecraft.getInstance().gameRenderer.mainRenderTarget().getColorTextureView(), sampler);
                 pass.draw(3, 1, 0, 0);
             }
             try (var pass = encoder.createRenderPass(() -> "Settings glass frost", blurredView, java.util.Optional.empty())) {
-                pass.setPipeline(BLUR);
+                pass.setPipeline(RenderSystem.getCompiledPipeline(BLUR));
                 RenderSystem.bindDefaultUniforms(pass);
-                pass.bindTexture("InSampler", sceneView, sampler);
+                pass.setUniform("InSampler", sceneView, sampler);
                 pass.draw(3, 1, 0, 0);
             }
         }
@@ -639,7 +644,7 @@ public class MetalRenderSettingsScreen extends Screen {
             maxTitleW = Math.max(40, pw - (tx - px) - 18 - dotsW);
         }
         String title = "MetalRender";
-        String version = "Settings  \u2022  v2.0.0";
+        String version = "Settings  \u2022  v2.0.2"; //bro i forgot to change this for two whole versions :<
         int titleW = font.width(title);
         int versionW = font.width(version);
         if (titleW + 6 + versionW > maxTitleW) {

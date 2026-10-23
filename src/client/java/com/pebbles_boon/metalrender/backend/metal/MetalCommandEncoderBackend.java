@@ -1,16 +1,16 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.buffers.GpuFence;
-import com.mojang.blaze3d.systems.CommandEncoderBackend;
-import com.mojang.blaze3d.systems.GpuQueryPool;
-import com.mojang.blaze3d.systems.RenderPassDescriptor;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.commands.GpuFence;
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend;
+import com.mojang.renderpearl.api.commands.GpuQueryPool;
+import com.mojang.renderpearl.api.commands.RenderPassDescriptor;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.systems.TransientMemory;
-import com.mojang.blaze3d.systems.RenderPassBackend;
-import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.buffers.TransientMemory;
+import com.mojang.renderpearl.backend.api.RenderPassBackend;
+import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.pebbles_boon.metalrender.config.MetalRenderConfig;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
@@ -31,7 +31,7 @@ public final class MetalCommandEncoderBackend implements CommandEncoderBackend {
     private long completedSerial;
     private long frameIndex = 1;
     private static final boolean LAZY_CLEARS = MetalRenderConfig.getBool("metalrender.lazyClears", true);
-    private static final boolean SPLIT_PASSES = MetalRenderConfig.getBool("metalrender.splitPasses", true);
+    private static final boolean SPLIT_PASSES = MetalRenderConfig.getBool("metalrender.splitPasses", false);
     private static final int BIND_SLOTS = 64;
     private final Map<MetalTexture, Vector4fc> pendingColor = new HashMap<>();
     private final Map<MetalTexture, Double> pendingDepth = new HashMap<>();
@@ -69,9 +69,31 @@ public final class MetalCommandEncoderBackend implements CommandEncoderBackend {
         return frameIndex;
     }
 
+    private static final long COMPLETED_POLL_NS = 200_000L;
+    private long lastCompletedPollNs;
+
     private long completed() {
-        completedSerial = Math.max(completedSerial, MetalNative.nCtxCompleted(ctx));
+        long now = System.nanoTime();
+        if (now - lastCompletedPollNs >= COMPLETED_POLL_NS) {
+            lastCompletedPollNs = now;
+            completedSerial = Math.max(completedSerial, MetalNative.nCtxCompleted(ctx));
+        }
         return completedSerial;
+    }
+
+    private boolean isComplete(long serial) {
+        if (serial <= completedSerial) {
+            return true;
+        }
+        if (serial >= openSerial) {
+            return false;
+        }
+        return serial <= completed();
+    }
+
+    private void refreshCompleted() {
+        lastCompletedPollNs = System.nanoTime();
+        completedSerial = Math.max(completedSerial, MetalNative.nCtxCompleted(ctx));
     }
 
     MetalStagingRing.Allocation stage(long size, long alignment) {
@@ -257,7 +279,7 @@ public final class MetalCommandEncoderBackend implements CommandEncoderBackend {
         }
         long timeoutMs = Math.max(1L, timeoutNanos / 1_000_000L);
         boolean done = MetalNative.nCtxWait(ctx, serial, timeoutMs);
-        completed();
+        refreshCompleted();
         return done;
     }
 
@@ -269,9 +291,9 @@ public final class MetalCommandEncoderBackend implements CommandEncoderBackend {
             flush();
         }
         while (!MetalNative.nCtxWait(ctx, lastUse, 1000L)) {
-            completed();
+            refreshCompleted();
         }
-        completed();
+        refreshCompleted();
     }
 
     void presentFrame() {
@@ -312,7 +334,7 @@ public final class MetalCommandEncoderBackend implements CommandEncoderBackend {
         }
         String label = descriptor.label() != null ? descriptor.label().get() : null;
         MetalRenderPassBackend pass = new MetalRenderPassBackend(this, device, label, color, depth,
-                descriptor.renderArea);
+                descriptor.renderArea());
         boolean doClearColor = clearColor.isPresent();
         Vector4fc argb = clearColor.orElse(null);
         boolean doClearDepth = depth != null && clearDepth.isPresent();
@@ -343,7 +365,7 @@ public final class MetalCommandEncoderBackend implements CommandEncoderBackend {
                 }
             }
         }
-        boolean split = SPLIT_PASSES && pass.label != null && pass.label.startsWith("metalrender_");
+        boolean split = SPLIT_PASSES && "metalrender_terrain".equals(pass.label);
         if (doClearColor || doClearDepth || split || !isEncoding(pass)) {
             if (!doClearColor && doClearDepth && !split && isEncoding(pass)
                     && MetalNative.nCtxClearDepthFolded(ctx, depthValue)) {
@@ -394,7 +416,7 @@ public final class MetalCommandEncoderBackend implements CommandEncoderBackend {
 
     @Override
     public void clearColorAndDepthTextures(GpuTexture color, Vector4fc argb, GpuTexture depth,
-            double clearDepth, int x, int y, int width, int height) {
+            double clearDepth, int x, int y, int width, int height, int mipLevel) {
         flushPendingClears((MetalTexture) color);
         flushPendingClears((MetalTexture) depth);
         endEncoder();
@@ -425,7 +447,11 @@ public final class MetalCommandEncoderBackend implements CommandEncoderBackend {
         if (length <= 0 || buffer.isClosed()) {
             return;
         }
-        if (buffer.lastUseFrame <= completed()) {
+        if (isComplete(buffer.lastUseFrame)) {
+            buffer.view(slice.offset(), length).put(data.duplicate());
+            return;
+        }
+        if (buffer.rename(completed(), length < buffer.byteSize)) {
             buffer.view(slice.offset(), length).put(data.duplicate());
             return;
         }
@@ -441,6 +467,12 @@ public final class MetalCommandEncoderBackend implements CommandEncoderBackend {
     public void copyToBuffer(GpuBufferSlice source, GpuBufferSlice target) {
         MetalBuffer src = (MetalBuffer) source.buffer();
         MetalBuffer dst = (MetalBuffer) target.buffer();
+        long copyLength = Math.min(source.length(), target.length());
+        if (copyLength > 0 && isComplete(src.lastUseFrame) && isComplete(dst.lastUseFrame) && src.contents() != 0
+                && dst.contents() != 0) {
+            MemoryUtil.memCopy(src.contents() + source.offset(), dst.contents() + target.offset(), copyLength);
+            return;
+        }
         endRenderForBlit();
         MetalNative.nCtxCopyBuffer(ctx, src.handle(), source.offset(), dst.handle(), target.offset(),
                 Math.min(source.length(), target.length()));

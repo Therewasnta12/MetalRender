@@ -1,6 +1,6 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import com.pebbles_boon.metalrender.util.MetalLogger;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -82,6 +82,8 @@ public final class FamilyTable {
         vertex("core/position_tex", Family.SKY);
         vertex("core/rendertype_clouds", Family.CLOUDS_WEATHER);
         vertex("core/rendertype_world_border", Family.CLOUDS_WEATHER);
+        vertex("core/clouds", Family.CLOUDS_WEATHER);
+        vertex("core/world_border", Family.CLOUDS_WEATHER);
         vertex("core/rendertype_lines", Family.LINES);
         vertex("core/debug_point", Family.LINES);
         vertex("core/position_color", Family.LINES);
@@ -132,6 +134,8 @@ public final class FamilyTable {
         VERTEX_VARIANTS.put("core/particle", 100);
         VERTEX_VARIANTS.put("core/rendertype_clouds", 110);
         VERTEX_VARIANTS.put("core/rendertype_world_border", 111);
+        VERTEX_VARIANTS.put("core/clouds", 110);
+        VERTEX_VARIANTS.put("core/world_border", 111);
 
         FRAGMENT_VARIANTS.put("core/gui", 0);
         FRAGMENT_VARIANTS.put("core/position_tex_color", 1);
@@ -177,6 +181,8 @@ public final class FamilyTable {
         FRAGMENT_VARIANTS.put("core/particle", 100);
         FRAGMENT_VARIANTS.put("core/rendertype_clouds", 110);
         FRAGMENT_VARIANTS.put("core/rendertype_world_border", 111);
+        FRAGMENT_VARIANTS.put("core/clouds", 110);
+        FRAGMENT_VARIANTS.put("core/world_border", 111);
     }
 
     private FamilyTable() {
@@ -190,6 +196,60 @@ public final class FamilyTable {
         return id == null ? "" : id.getPath();
     }
 
+    private static final Map<String, RenderPipeline> BY_LOCATION = new HashMap<>();
+
+    static net.minecraft.resources.Identifier vertexShader(RenderPipeline pipeline) {
+        return pipeline.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.VERTEX);
+    }
+
+    static net.minecraft.resources.Identifier fragmentShader(RenderPipeline pipeline) {
+        return pipeline.getShaders().get(com.mojang.renderpearl.api.pipeline.ShaderType.FRAGMENT);
+    }
+
+    static List<RenderPipeline> staticPipelines() {
+        List<RenderPipeline> all = new java.util.ArrayList<>(RenderPipelines.requiredPipelines());
+        all.addAll(RenderPipelines.optionalPipelines());
+        return all;
+    }
+
+    public static synchronized void register(RenderPipeline pipeline) {
+        BY_LOCATION.put(pipeline.getLocation().toString(), pipeline);
+    }
+
+    static synchronized RenderPipeline find(String location) {
+        if (BY_LOCATION.isEmpty()) {
+            for (RenderPipeline pipeline : staticPipelines()) {
+                BY_LOCATION.putIfAbsent(pipeline.getLocation().toString(), pipeline);
+            }
+        }
+        return BY_LOCATION.get(location);
+    }
+
+    static synchronized RenderPipeline findOrSynthesize(
+            com.mojang.renderpearl.backend.api.BackendRenderPipeline.CreateInfo info) {
+        RenderPipeline found = find(info.name());
+        if (found != null || info.shaders().size() < 2) {
+            return found;
+        }
+        try {
+            RenderPipeline.Builder builder = RenderPipeline.builder()
+                    .withLocation(net.minecraft.resources.Identifier.parse(info.name()))
+                    .withVertexShader(net.minecraft.resources.Identifier.parse(info.shaders().get(0).name()))
+                    .withFragmentShader(net.minecraft.resources.Identifier.parse(info.shaders().get(1).name()));
+            builder.withPrimitiveTopology(info.primitiveTopology()).withCull(info.cull());
+            if (!info.colorTargetStates().isEmpty()) {
+                builder.withColorTargetState(info.colorTargetStates().get(0));
+            }
+            builder.withDepthStencilState(java.util.Optional.ofNullable(info.depthStencilState()));
+            RenderPipeline built = builder.build();
+            BY_LOCATION.put(info.name(), built);
+            return built;
+        } catch (RuntimeException e) {
+            MetalLogger.warn("could not synthesize pipeline %s: %s", info.name(), e);
+            return null;
+        }
+    }
+
     public static Family lookup(RenderPipeline pipeline) {
         String field = fieldName(pipeline);
         if (field != null) {
@@ -198,7 +258,7 @@ public final class FamilyTable {
                 return override;
             }
         }
-        Family family = BY_VERTEX_SHADER.get(String.valueOf(pipeline.getVertexShader()));
+        Family family = BY_VERTEX_SHADER.get(String.valueOf(vertexShader(pipeline)));
         return family != null ? family : Family.UNMAPPED;
     }
 
@@ -216,31 +276,32 @@ public final class FamilyTable {
     }
 
     static int vertexVariant(RenderPipeline pipeline) {
-        if (!isVanilla(pipeline.getVertexShader())) {
+        if (!isVanilla(vertexShader(pipeline))) {
             return -1;
         }
-        int text = textVariant(pipeline, shaderKey(pipeline.getVertexShader()));
+        int text = textVariant(pipeline, shaderKey(vertexShader(pipeline)));
         if (text != -2) {
             return text;
         }
-        return VERTEX_VARIANTS.getOrDefault(shaderKey(pipeline.getVertexShader()), -1);
+        return VERTEX_VARIANTS.getOrDefault(shaderKey(vertexShader(pipeline)), -1);
     }
 
     static int fragmentVariant(RenderPipeline pipeline) {
-        if ("metalrender".equals(pipeline.getFragmentShader().getNamespace())) {
-            if ("core/glass".equals(pipeline.getFragmentShader().getPath()))
-                return 3;
-            if ("core/glass_blur".equals(pipeline.getFragmentShader().getPath()))
-                return 4;
+        var glassFlags = pipeline.getShaderDefines().flags();
+        if (glassFlags.contains("METALRENDER_GLASS")) {
+            return 3;
         }
-        if (!isVanilla(pipeline.getFragmentShader())) {
+        if (glassFlags.contains("METALRENDER_GLASS_BLUR")) {
+            return 4;
+        }
+        if (!isVanilla(fragmentShader(pipeline))) {
             return -1;
         }
-        int text = textVariant(pipeline, shaderKey(pipeline.getFragmentShader()));
+        int text = textVariant(pipeline, shaderKey(fragmentShader(pipeline)));
         if (text != -2) {
             return text;
         }
-        return FRAGMENT_VARIANTS.getOrDefault(shaderKey(pipeline.getFragmentShader()), -1);
+        return FRAGMENT_VARIANTS.getOrDefault(shaderKey(fragmentShader(pipeline)), -1);
     }
 
     private static boolean isVanilla(net.minecraft.resources.Identifier id) {
@@ -278,7 +339,7 @@ public final class FamilyTable {
             return;
         }
         coverageLogged = true;
-        List<RenderPipeline> pipelines = RenderPipelines.getStaticPipelines();
+        List<RenderPipeline> pipelines = staticPipelines();
         int mapped = 0;
         StringBuilder unmapped = new StringBuilder();
         int unmappedCount = 0;

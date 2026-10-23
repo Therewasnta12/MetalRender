@@ -1,8 +1,8 @@
 package com.pebbles_boon.metalrender.backend.metal;
 
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
-import com.mojang.blaze3d.systems.TransientMemory;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.TransientMemory;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
